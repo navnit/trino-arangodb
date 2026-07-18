@@ -1,47 +1,156 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
-                             http://maven.apache.org/xsd/maven-4.0.0.xsd">
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
-
     <groupId>io.arango</groupId>
-    <artifactId>trino-connector</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
-    <name>ArangoDB Trino Connector</name>
-    <description>Trino connector for ArangoDB</description>
+    <artifactId>trino-arangodb</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+    <packaging>trino-plugin</packaging>
 
     <properties>
-        <maven.compiler.release>24</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <project.build.targetEncoding>UTF-8</project.build.targetEncoding>
-
-        <trino.version>476</trino.version>
-        <trino-maven-plugin.version>19</trino-maven-plugin.version>
-
-        <junit.version>5.9.1</junit.version>
+        <maven.compiler.release>24</maven.compiler.release>
+        <dep.trino.version>476</dep.trino.version>
+        <dep.airlift.version>293</dep.airlift.version>
+        <dep.arango.version>7.13.0</dep.arango.version>
+        <dep.testcontainers.version>1.20.4</dep.testcontainers.version>
+        <dep.junit.version>5.11.3</dep.junit.version>
     </properties>
 
     <dependencies>
-        <!-- Trino SPI -->
         <dependency>
             <groupId>io.trino</groupId>
             <artifactId>trino-spi</artifactId>
-            <version>${trino.version}</version>
+            <version>${dep.trino.version}</version>
             <scope>provided</scope>
         </dependency>
-
-        <!-- Testing -->
+        <!-- Not in brief's Step 3 verbatim listing: added to satisfy trino-maven-plugin's
+             check-spi-dependencies goal. These artifacts are non-optional entries in
+             trino-spi's own compile/runtime dependency graph (and therefore must be
+             'provided', supplied by Trino's plugin classloader at runtime), but other
+             declared dependencies here (arangodb-java-driver's jackson-databind, guice's
+             opentelemetry instrumentation) also pull them in, mediating their effective
+             scope to 'compile'. A real Trino connector module normally inherits this scope
+             pinning from the io.trino:trino-root parent pom's dependencyManagement; this
+             standalone pom (per the brief, no parent) has no such pinning, so each artifact
+             is pinned explicitly here instead. Verified via mvn dependency:tree
+             cross-referenced against trino-spi:476's own pom, including its <optional> flags:
+             jackson-annotations, opentelemetry-api and opentelemetry-context are non-optional
+             in trino-spi so they are pinned to 'provided' here; slice, opentelemetry-api-
+             incubator and jol-core are also non-optional in trino-spi but already mediate to
+             'provided' naturally, so no override was needed. error_prone_annotations and
+             jakarta.annotation-api ARE marked <optional>true</optional> in trino-spi's pom
+             (not part of its guaranteed runtime SPI surface); the plugin goal rejects
+             'provided' for those two, so they are intentionally left undeclared here and
+             resolve at their natural 'compile' scope. See task-1-report.md Redo section. -->
         <dependency>
-            <groupId>org.junit.jupiter</groupId>
-            <artifactId>junit-jupiter-api</artifactId>
-            <version>${junit.version}</version>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-annotations</artifactId>
+            <version>2.19.0</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-api</artifactId>
+            <version>1.50.0</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-context</artifactId>
+            <version>1.50.0</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.airlift</groupId>
+            <artifactId>bootstrap</artifactId>
+            <version>${dep.airlift.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.airlift</groupId>
+            <artifactId>configuration</artifactId>
+            <version>${dep.airlift.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.google.inject</groupId>
+            <artifactId>guice</artifactId>
+            <version>7.0.0</version>
+        </dependency>
+        <dependency>
+            <groupId>com.google.guava</groupId>
+            <artifactId>guava</artifactId>
+            <version>33.3.1-jre</version>
+        </dependency>
+        <dependency>
+            <groupId>com.arangodb</groupId>
+            <artifactId>arangodb-java-driver</artifactId>
+            <version>${dep.arango.version}</version>
+        </dependency>
+
+        <!-- test -->
+        <dependency>
+            <groupId>io.trino</groupId>
+            <artifactId>trino-testing</artifactId>
+            <version>${dep.trino.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.airlift</groupId>
+            <artifactId>configuration</artifactId>
+            <version>${dep.airlift.version}</version>
+            <classifier>tests</classifier>
             <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
-            <artifactId>junit-jupiter-engine</artifactId>
-            <version>${junit.version}</version>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${dep.junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- Not in brief's Step 3 verbatim listing: forced additions. io.trino:trino-testing:476
+             transitively depends directly on org.junit.jupiter:junit-jupiter-api:5.13.0 (a
+             depth-2 dependency, same depth as junit-jupiter's own transitive request for
+             junit-jupiter-api:5.11.3), and Maven's nearest-wins mediation breaks that depth
+             tie by declaration order, so 5.13.0 was winning and being paired at runtime with
+             junit-jupiter-engine:5.11.3, a binary-incompatible API/engine skew that broke
+             test discovery (UnsupportedOperationException in DisplayNameGenerator). Pinning
+             junit-jupiter-api explicitly as a depth-1 dependency here forces it back to
+             ${dep.junit.version}, which always wins mediation over any depth-2 request
+             regardless of order. Separately, junit-platform-launcher was absent from the
+             resolved tree entirely; Surefire 3.5.2's JUnit-Platform provider needs it on the
+             test classpath, and without it the forked test JVM failed with
+             NoClassDefFoundError on org.junit.platform.engine.reporting.OutputDirectoryProvider.
+             Pinned to 1.11.3, the platform release paired with junit-jupiter 5.11.3. See
+             task-1-report.md Redo section. -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-api</artifactId>
+            <version>${dep.junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.platform</groupId>
+            <artifactId>junit-platform-launcher</artifactId>
+            <version>1.11.3</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <version>3.26.3</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers</artifactId>
+            <version>${dep.testcontainers.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${dep.testcontainers.version}</version>
             <scope>test</scope>
         </dependency>
     </dependencies>
@@ -49,27 +158,25 @@
     <build>
         <plugins>
             <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-compiler-plugin</artifactId>
-                <version>3.11.0</version>
-                <configuration>
-                    <release>${maven.compiler.release}</release>
-                </configuration>
+                <groupId>io.trino</groupId>
+                <artifactId>trino-maven-plugin</artifactId>
+                <!-- Use the exact plugin version from Trino 476's root pom (>=15); verify at pin. -->
+                <version>15</version>
+                <extensions>true</extensions>
             </plugin>
-
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
-                <version>3.0.0-M9</version>
+                <version>3.5.2</version>
                 <configuration>
-                    <argLine>-XX:+TieredCompilation -XX:TieredStopAtLevel=1</argLine>
+                    <!-- DistributedQueryRunner needs Trino's test JVM flags. Copy the exact
+                         argLine from Trino 476's root pom and verify at pin. -->
+                    <argLine>-Xmx2g -XX:+EnableDynamicAgentLoading -Dfile.encoding=UTF-8
+                        --add-opens=java.base/java.nio=ALL-UNNAMED
+                        --add-opens=java.base/java.lang=ALL-UNNAMED
+                        --add-opens=java.base/java.util=ALL-UNNAMED
+                        --add-opens=java.base/sun.nio.ch=ALL-UNNAMED</argLine>
                 </configuration>
-            </plugin>
-
-            <plugin>
-                <groupId>io.trino</groupId>
-                <artifactId>trino-maven-plugin</artifactId>
-                <version>${trino-maven-plugin.version}</version>
             </plugin>
         </plugins>
     </build>
