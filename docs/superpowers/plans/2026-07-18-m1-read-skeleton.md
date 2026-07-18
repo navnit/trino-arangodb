@@ -6,14 +6,14 @@
 
 **Architecture:** Standard Trino Connector SPI plugin (Java, Maven, Airlift/Guice). `ArangoClient` wraps `arangodb-java-driver` 7.x. `SchemaResolver` infers table schemas by merge-sampling documents; `TypeMapper` maps JSON/VelocyPack → Trino types with numeric widening. `ArangoMetadata` exposes schemas/tables/columns; `ArangoSplitManager` emits one split; `ArangoPageSource` runs the AQL cursor and builds columnar pages. No pushdown, no writes, no schema override/validation sources (those arrive in M2/M5).
 
-**Tech Stack:** Java 23, Maven, Trino SPI, `com.arangodb:arangodb-java-driver:7.x` (HTTP/2 + VelocyPack), Airlift Bootstrap/Guice, JUnit 5 + AssertJ, Testcontainers.
+**Tech Stack:** Java 23, Maven, Trino SPI, `com.arangodb:arangodb-java-driver:7.x` (HTTP/2 + JSON serde), Airlift Bootstrap/Guice, JUnit 5 + AssertJ, Testcontainers.
 
 ## Global Constraints
 
 - **Connector name:** `arangodb` (registered by `ArangoConnectorFactory.getName()`).
-- **Java:** 23 (matches Trino server JDK; verify at pin time — may be 24). Maven `maven.compiler.release=23`.
-- **Trino version:** pin one stable version (plan written against **Trino 476**). **SPI signatures below target 476 — verify each against the pinned version at task start and adjust** (the page-source and `getTableHandle` signatures in particular have shifted across recent releases). Use `<dep.trino.version>` property in the pom.
-- **Driver:** `arangodb-java-driver` **7.x** over HTTP/2 + VelocyPack module only (no VelocyStream — removed in 3.12).
+- **Java:** matches the Trino server JDK. Trino's Java-24 bump landed in the 475–478 window — **at pin time, confirm whether 476 requires JDK 23 or 24 and set the build JDK *and* `maven.compiler.release` to match.** A mismatch makes `trino-testing`/`DistributedQueryRunner` fail to load regardless of the compiler release, so every integration task (T2/T4/T9) depends on this being right.
+- **Trino version:** pin one stable version (plan written against **Trino 476**). **SPI signatures below target 476 — verify each against the pinned version at task start and adjust.** Confirmed drift already folded in: the page-source emits via **`getNextSourcePage()`→`SourcePage`** (not `getNextPage()`→`Page`), per the ~468 SourcePage refactor (T8). Use `<dep.trino.version>` property in the pom.
+- **Driver:** `arangodb-java-driver` **7.x** over **HTTP/2 with the JSON serde** (`Protocol.HTTP2_JSON`) — the umbrella artifact bundles core + http-protocol + jackson-serde-json, so **no extra serde dependency** is needed. VelocyStream is not used (removed in 3.12). Binary VelocyPack serde is an optional later optimization requiring `com.arangodb:jackson-serde-vpack`.
 - **Package root:** `io.arango.trino`.
 - **Type mapping (M1 subset):** bool→`BOOLEAN`, integer→`BIGINT`, integer>BIGINT/uint64→`DECIMAL(38,0)`, float→`DOUBLE`, int/float conflict→**widen to `DOUBLE`**, string→`VARCHAR`, array→`ARRAY(e)`, object→`ROW(...)`, incompatible conflict→`VARCHAR` (default `mixed-type-strategy`), null/absent→column retained, `_key`/`_id`/`_rev`→hidden `VARCHAR`, `_from`/`_to`→visible `VARCHAR`. **Dates are strings in M1** (no timestamp inference — schema-source-only, deferred to M5).
 - **Coercion:** `lenient` (type mismatch → `NULL`) is the only M1 behavior; `strict` config wired but not exercised until later.
@@ -171,11 +171,6 @@ Expected: FAIL — `ArangoConfig` does not exist / does not compile.
             <version>${dep.airlift.version}</version>
         </dependency>
         <dependency>
-            <groupId>io.airlift</groupId>
-            <artifactId>json</artifactId>
-            <version>${dep.airlift.version}</version>
-        </dependency>
-        <dependency>
             <groupId>com.google.inject</groupId>
             <artifactId>guice</artifactId>
             <version>7.0.0</version>
@@ -236,13 +231,23 @@ Expected: FAIL — `ArangoConfig` does not exist / does not compile.
             <plugin>
                 <groupId>io.trino</groupId>
                 <artifactId>trino-maven-plugin</artifactId>
-                <version>14</version>
+                <!-- Use the exact plugin version from Trino 476's root pom (>=15); verify at pin. -->
+                <version>15</version>
                 <extensions>true</extensions>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.5.2</version>
+                <configuration>
+                    <!-- DistributedQueryRunner needs Trino's test JVM flags. Copy the exact
+                         argLine from Trino 476's root pom and verify at pin. -->
+                    <argLine>-Xmx2g -XX:+EnableDynamicAgentLoading -Dfile.encoding=UTF-8
+                        --add-opens=java.base/java.nio=ALL-UNNAMED
+                        --add-opens=java.base/java.lang=ALL-UNNAMED
+                        --add-opens=java.base/java.util=ALL-UNNAMED
+                        --add-opens=java.base/sun.nio.ch=ALL-UNNAMED</argLine>
+                </configuration>
             </plugin>
         </plugins>
     </build>
@@ -467,13 +472,16 @@ package io.arango.trino.client;
 
 import com.arangodb.ArangoCursor;
 import com.arangodb.ArangoDB;
-import com.arangodb.ArangoDatabase;
 import com.arangodb.Protocol;
 import com.arangodb.entity.BaseDocument;
 import com.arangodb.entity.CollectionEntity;
 import com.arangodb.entity.CollectionType;
+import com.arangodb.model.CollectionCreateOptions;
 import com.google.common.collect.ImmutableList;
+import com.google.common.net.HostAndPort;
+import com.google.inject.Inject;
 import io.arango.trino.ArangoConfig;
+import jakarta.annotation.PreDestroy;
 
 import java.util.List;
 import java.util.Map;
@@ -483,14 +491,15 @@ public class ArangoClient implements AutoCloseable {
 
     private final ArangoDB arango;
 
+    @Inject
     public ArangoClient(ArangoConfig config) {
         ArangoDB.Builder builder = new ArangoDB.Builder()
                 .protocol(Protocol.HTTP2_JSON)
                 .user(config.getUser())
                 .password(config.getPassword());
         for (String hostPort : config.getHostList()) {
-            String[] parts = hostPort.split(":");
-            builder.host(parts[0], Integer.parseInt(parts[1]));
+            HostAndPort hp = HostAndPort.fromString(hostPort).withDefaultPort(8529);
+            builder.host(hp.getHost(), hp.getPort());
         }
         this.arango = builder.build();
     }
@@ -525,15 +534,22 @@ public class ArangoClient implements AutoCloseable {
         return arango.db(database).query(aql, BaseDocument.class, bindVars);
     }
 
-    // ---- test-only seeding helpers (package-visible, used by tests) ----
+    // ---- test-only seeding helpers (public so cross-package tests in T9 can call them) ----
     public void createDatabaseForTest(String db) { if (!arango.db(db).exists()) arango.createDatabase(db); }
     public void createDocumentCollectionForTest(String db, String name) {
         if (!arango.db(db).collection(name).exists()) arango.db(db).createCollection(name);
+    }
+    public void createEdgeCollectionForTest(String db, String name) {
+        if (!arango.db(db).collection(name).exists()) {
+            arango.db(db).createCollection(name,
+                    new CollectionCreateOptions().type(CollectionType.EDGES));
+        }
     }
     public void insertForTest(String db, String name, Map<String, Object> doc) {
         arango.db(db).collection(name).insertDocument(doc);
     }
 
+    @PreDestroy
     @Override
     public void close() { arango.shutdown(); }
 }
@@ -606,6 +622,14 @@ class TypeMapperTest {
     }
 
     @Test
+    void nullThenNumericResolvesToNumericNotVarchar() {
+        // regression: a field null in early docs and numeric later must NOT degrade to VARCHAR
+        Type unknown = mapper.inferType(null); // bottom sentinel (UNKNOWN)
+        assertThat(mapper.merge(unknown, DOUBLE, MixedTypeStrategy.VARCHAR)).isEqualTo(DOUBLE);
+        assertThat(mapper.merge(BIGINT, unknown, MixedTypeStrategy.VARCHAR)).isEqualTo(BIGINT);
+    }
+
+    @Test
     void inferArrayOfLongs() {
         assertThat(mapper.inferType(List.of(1L, 2L)).getDisplayName()).isEqualTo("array(bigint)");
     }
@@ -653,6 +677,7 @@ import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DecimalType.createDecimalType;
 import static io.trino.spi.type.DoubleType.DOUBLE;
+import static io.trino.spi.type.UnknownType.UNKNOWN;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 
 public class TypeMapper {
@@ -660,7 +685,7 @@ public class TypeMapper {
 
     public Type inferType(Object value) {
         if (value == null) {
-            return VARCHAR; // unknown scalar until a non-null is seen; merge upgrades it
+            return UNKNOWN; // bottom sentinel: merge(UNKNOWN, T) == T; SchemaResolver defaults leftover UNKNOWN to VARCHAR
         }
         if (value instanceof Boolean) {
             return BOOLEAN;
@@ -698,6 +723,12 @@ public class TypeMapper {
     }
 
     public Type merge(Type a, Type b, MixedTypeStrategy strategy) {
+        if (a.equals(UNKNOWN)) {
+            return b; // bottom absorbs into the concrete type
+        }
+        if (b.equals(UNKNOWN)) {
+            return a;
+        }
         if (a.equals(b)) {
             return a;
         }
@@ -756,7 +787,7 @@ git commit -m "feat: TypeMapper with numeric widening and nested row/array infer
 - Test: `src/test/java/io/arango/trino/schema/SchemaResolverTest.java`
 
 **Interfaces:**
-- Produces: `List<ArangoColumn> resolveColumns(String database, CollectionInfo collection)` where `ArangoColumn` is a record `(String name, Type type, boolean hidden)` **defined inside SchemaResolver** for now (promoted to a handle in T5). Rules: union of top-level field names across sampled docs; per-field type = fold of `TypeMapper.merge`; `_key`/`_id`/`_rev` → hidden `VARCHAR`; for edge collections `_from`/`_to` → visible `VARCHAR`; empty sample → empty column list (caller decides error).
+- Produces: `List<ArangoColumn> resolveColumns(String database, CollectionInfo collection)` where `ArangoColumn` is a record `(String name, Type type, boolean hidden)` **defined inside SchemaResolver** for now (promoted to a handle in T5). Rules: union of top-level field names across sampled docs; per-field type = fold of `TypeMapper.merge`; `_key`/`_id`/`_rev` → hidden `VARCHAR`; for edge collections `_from`/`_to` → visible `VARCHAR`; empty sample → only the hidden system columns (no visible columns), so `SELECT *` yields zero columns — acceptable for M1, hardened to §4.2 fault-tolerant listing in M2.
 - Consumes: `ArangoClient` (T2), `TypeMapper` (T3), `ArangoConfig` (T1), `CollectionInfo` (T2).
 
 - [ ] **Step 1: Write the failing test**
@@ -855,14 +886,15 @@ import io.trino.spi.type.Type;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
+import static io.trino.spi.type.UnknownType.UNKNOWN;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 
 public class SchemaResolver {
     public record ArangoColumn(String name, Type type, boolean hidden) {}
 
-    private static final Set<String> SYSTEM_ATTRS = Set.of("_key", "_id", "_rev");
+    // List (not Set) for deterministic hidden-column order across JVM runs
+    private static final List<String> SYSTEM_ATTRS = List.of("_key", "_id", "_rev");
 
     private final ArangoClient client;
     private final TypeMapper typeMapper;
@@ -893,7 +925,9 @@ public class SchemaResolver {
         }
 
         ImmutableList.Builder<ArangoColumn> out = ImmutableList.builder();
-        userFields.forEach((name, type) -> out.add(new ArangoColumn(name, type, false)));
+        // any field seen only as null across the whole sample stays UNKNOWN -> default to VARCHAR
+        userFields.forEach((name, type) ->
+                out.add(new ArangoColumn(name, type.equals(UNKNOWN) ? VARCHAR : type, false)));
         // system attributes: hidden varchar
         for (String sys : SYSTEM_ATTRS) {
             out.add(new ArangoColumn(sys, VARCHAR, true));
@@ -1006,24 +1040,34 @@ public record ArangoTableHandle(
 // src/main/java/io/arango/trino/ArangoMetadata.java
 package io.arango.trino;
 
+import com.arangodb.ArangoDBException;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.inject.Inject;
 import io.arango.trino.client.ArangoClient;
 import io.arango.trino.client.ArangoClient.CollectionInfo;
 import io.arango.trino.handle.ArangoColumnHandle;
 import io.arango.trino.handle.ArangoTableHandle;
 import io.arango.trino.schema.SchemaResolver;
 import io.arango.trino.schema.SchemaResolver.ArangoColumn;
+import io.trino.spi.TrinoException;
 import io.trino.spi.connector.*;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
+
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 
 public class ArangoMetadata implements ConnectorMetadata {
     private final ArangoClient client;
     private final SchemaResolver schemaResolver;
+    // M1: unbounded per-connector memoization so one SELECT samples a collection once;
+    // spec §4.3 TTL cache lands in a later milestone.
+    private final Map<SchemaTableName, List<ArangoColumn>> columnCache = new ConcurrentHashMap<>();
 
+    @Inject
     public ArangoMetadata(ArangoClient client, SchemaResolver schemaResolver) {
         this.client = client;
         this.schemaResolver = schemaResolver;
@@ -1037,11 +1081,19 @@ public class ArangoMetadata implements ConnectorMetadata {
     @Override
     public ArangoTableHandle getTableHandle(ConnectorSession session, SchemaTableName tableName,
             Optional<ConnectorTableVersion> startVersion, Optional<ConnectorTableVersion> endVersion) {
-        return client.listCollections(tableName.getSchemaName()).stream()
-                .filter(c -> !c.isSystem() && c.name().equals(tableName.getTableName()))
-                .findFirst()
-                .map(c -> new ArangoTableHandle(tableName.getSchemaName(), c.name(), c.isEdge()))
-                .orElse(null); // null => table not found (Trino throws)
+        if (startVersion.isPresent() || endVersion.isPresent()) {
+            throw new TrinoException(NOT_SUPPORTED, "This connector does not support versioned tables");
+        }
+        try {
+            return client.listCollections(tableName.getSchemaName()).stream()
+                    .filter(c -> !c.isSystem() && c.name().equals(tableName.getTableName()))
+                    .findFirst()
+                    .map(c -> new ArangoTableHandle(tableName.getSchemaName(), c.name(), c.isEdge()))
+                    .orElse(null); // null => table not found (Trino throws)
+        }
+        catch (ArangoDBException e) {
+            return null; // schema (database) does not exist => table not found
+        }
     }
 
     @Override
@@ -1083,8 +1135,9 @@ public class ArangoMetadata implements ConnectorMetadata {
     }
 
     private List<ArangoColumn> resolve(ArangoTableHandle handle) {
-        return schemaResolver.resolveColumns(handle.schema(),
-                new CollectionInfo(handle.table(), handle.edge(), false));
+        return columnCache.computeIfAbsent(handle.schemaTableName(), key ->
+                schemaResolver.resolveColumns(handle.schema(),
+                        new CollectionInfo(handle.table(), handle.edge(), false)));
     }
 }
 ```
@@ -1200,8 +1253,16 @@ package io.arango.trino.handle;
 
 import io.trino.spi.connector.ConnectorSplit;
 
+import static io.airlift.slice.SizeOf.instanceSize;
+
 public record ArangoSplit() implements ConnectorSplit {
     // M1: a single whole-collection split carries no shard/range state.
+    private static final int INSTANCE_SIZE = instanceSize(ArangoSplit.class);
+
+    @Override
+    public long getRetainedSizeInBytes() {
+        return INSTANCE_SIZE;
+    }
 }
 ```
 
@@ -1214,6 +1275,8 @@ package io.arango.trino;
 import io.arango.trino.handle.ArangoSplit;
 import io.trino.spi.connector.*;
 
+import java.util.List;
+
 public class ArangoSplitManager implements ConnectorSplitManager {
     @Override
     public ConnectorSplitSource getSplits(
@@ -1223,7 +1286,7 @@ public class ArangoSplitManager implements ConnectorSplitManager {
             DynamicFilter dynamicFilter,
             Constraint constraint) {
         // M1: exactly one split per table (single-server / no shard fan-out).
-        return new FixedSplitSource(new ArangoSplit());
+        return new FixedSplitSource(List.of(new ArangoSplit()));
     }
 }
 ```
@@ -1255,7 +1318,7 @@ git commit -m "feat: single-split ArangoSplitManager"
   - `ArangoPageSource` implements `ConnectorPageSource`: iterates the cursor, writes one `Page` per batch using `PageBuilder`, converting each requested column's document value via a per-type appender.
 - Consumes: `ArangoClient` (T2), `AqlBuilder` (T6), `ArangoTableHandle`/`ArangoColumnHandle` (T5).
 
-> **SPI verification note:** `ConnectorPageSource`'s page-emission method changed across recent Trino (`getNextPage()`→`Page` vs `getNextSourcePage()`→`SourcePage`). The code below targets **476** using `getNextPage()`. Confirm against the pinned version at task start and adjust the one method signature + return type if needed.
+> **SPI verification note:** `ConnectorPageSource`'s page-emission method was refactored (~Trino 468) from `getNextPage()`→`Page` to **`getNextSourcePage()`→`io.trino.spi.connector.SourcePage`**. The code below targets **476** with `getNextSourcePage()`, wrapping the built `Page` via `SourcePage.create(page)`. Confirm the exact `SourcePage` factory name against the pinned version at task start — the method name and return type are settled, only the wrapping helper needs a glance. All other methods (`getCompletedBytes`, `getReadTimeNanos`, `isFinished`, `getMemoryUsage`, `close`) are unchanged at 476.
 
 - [ ] **Step 1: Write `ArangoPageSource`**
 
@@ -1270,6 +1333,7 @@ import io.trino.spi.Page;
 import io.trino.spi.PageBuilder;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.connector.ConnectorPageSource;
+import io.trino.spi.connector.SourcePage;
 import io.trino.spi.type.*;
 
 import java.util.List;
@@ -1296,7 +1360,7 @@ public class ArangoPageSource implements ConnectorPageSource {
     }
 
     @Override
-    public Page getNextPage() {
+    public SourcePage getNextSourcePage() {
         int rows = 0;
         while (rows < ROWS_PER_PAGE && cursor.hasNext()) {
             BaseDocument doc = cursor.next();
@@ -1319,7 +1383,7 @@ public class ArangoPageSource implements ConnectorPageSource {
         Page page = pageBuilder.build();
         completedBytes += page.getSizeInBytes();
         pageBuilder.reset();
-        return page;
+        return SourcePage.create(page);
     }
 
     private static Object valueFor(BaseDocument doc, String name, Map<String, Object> props) {
@@ -1413,7 +1477,7 @@ public class ArangoPageSourceProvider implements ConnectorPageSourceProvider {
 - [ ] **Step 3: Verify it compiles**
 
 Run: `mvn -q -DskipTests compile`
-Expected: BUILD SUCCESS. *(If the SPI note above triggers a signature mismatch, adjust `getNextPage`/`createPageSource` to the pinned version's signatures, then recompile.)*
+Expected: BUILD SUCCESS. *(If the pinned version's `SourcePage` factory differs from `SourcePage.create(page)`, adjust that one call per the SPI note above, then recompile.)*
 
 - [ ] **Step 4: Commit**
 
@@ -1470,6 +1534,10 @@ class ArangoConnectorQueryTest {
             seed.createDocumentCollectionForTest("shop", "users");
             seed.insertForTest("shop", "users", Map.of("name", "ada", "age", 36L));
             seed.insertForTest("shop", "users", Map.of("name", "bob", "age", 41L));
+            // edge collection to prove _from/_to surface as visible columns
+            seed.createEdgeCollectionForTest("shop", "knows");
+            seed.insertForTest("shop", "knows",
+                    Map.of("_from", "users/ada", "_to", "users/bob", "since", 2020L));
         }
 
         queryRunner = DistributedQueryRunner.builder(
@@ -1502,6 +1570,16 @@ class ArangoConnectorQueryTest {
         assertThat(r.getMaterializedRows().get(0).getField(0)).isEqualTo("ada");
         assertThat(r.getMaterializedRows().get(0).getField(1)).isEqualTo(36L);
         assertThat(r.getMaterializedRows().get(1).getField(0)).isEqualTo("bob");
+    }
+
+    @Test
+    void edgeCollectionExposesFromAndToColumns() {
+        MaterializedResult r = queryRunner.execute(
+                "SELECT \"_from\", \"_to\", since FROM arango.shop.knows");
+        assertThat(r.getRowCount()).isEqualTo(1);
+        assertThat(r.getMaterializedRows().get(0).getField(0)).isEqualTo("users/ada");
+        assertThat(r.getMaterializedRows().get(0).getField(1)).isEqualTo("users/bob");
+        assertThat(r.getMaterializedRows().get(0).getField(2)).isEqualTo(2020L);
     }
 }
 ```
@@ -1555,7 +1633,7 @@ public class ArangoModule implements Module {
     }
 }
 ```
-*(Add a `@Inject` constructor to `ArangoClient` [takes `ArangoConfig`], `SchemaResolver` [takes `ArangoClient, TypeMapper, ArangoConfig`], `ArangoMetadata` [takes `ArangoClient, SchemaResolver`], and `ArangoPageSourceProvider` [takes `ArangoClient, AqlBuilder`] — annotate the existing constructors with `@com.google.inject.Inject`.)*
+*(DI wiring: `ArangoClient`, `ArangoMetadata`, and `ArangoConnector` already carry `@Inject` in their shown code. Add `@com.google.inject.Inject` to the existing constructors of `SchemaResolver` [takes `ArangoClient, TypeMapper, ArangoConfig`] and `ArangoPageSourceProvider` [takes `ArangoClient, AqlBuilder`]. `TypeMapper` and `AqlBuilder` have no-arg constructors — Guice instantiates them without annotation. `LifeCycleManager` is auto-bound by Airlift `Bootstrap`, so it needs no explicit binding, and it invokes `@PreDestroy` on managed singletons like `ArangoClient` when `Connector.shutdown()` calls `lifeCycleManager.stop()`.)*
 
 - [ ] **Step 5: Write `ArangoConnector`**
 
@@ -1564,17 +1642,20 @@ public class ArangoModule implements Module {
 package io.arango.trino;
 
 import com.google.inject.Inject;
+import io.airlift.bootstrap.LifeCycleManager;
 import io.trino.spi.connector.*;
 import io.trino.spi.transaction.IsolationLevel;
 
 public class ArangoConnector implements Connector {
+    private final LifeCycleManager lifeCycleManager;
     private final ArangoMetadata metadata;
     private final ArangoSplitManager splitManager;
     private final ArangoPageSourceProvider pageSourceProvider;
 
     @Inject
-    public ArangoConnector(ArangoMetadata metadata, ArangoSplitManager splitManager,
-            ArangoPageSourceProvider pageSourceProvider) {
+    public ArangoConnector(LifeCycleManager lifeCycleManager, ArangoMetadata metadata,
+            ArangoSplitManager splitManager, ArangoPageSourceProvider pageSourceProvider) {
+        this.lifeCycleManager = lifeCycleManager;
         this.metadata = metadata;
         this.splitManager = splitManager;
         this.pageSourceProvider = pageSourceProvider;
@@ -1596,6 +1677,12 @@ public class ArangoConnector implements Connector {
 
     @Override
     public ConnectorPageSourceProvider getPageSourceProvider() { return pageSourceProvider; }
+
+    @Override
+    public void shutdown() {
+        // stops Airlift-managed singletons, invoking @PreDestroy on ArangoClient (closes driver threads)
+        lifeCycleManager.stop();
+    }
 }
 ```
 
@@ -1670,11 +1757,11 @@ git commit -m "feat: wire ArangoPlugin end-to-end; SELECT * over collections wor
 
 **Spec coverage (M1 rows of §10 + relevant §2–§5):**
 - DB/collection listing (lazy) → T2/T5 (`listSchemaNames`/`listTables`, resolved per-table). ✅
-- Merge-sampling schema, null column retained → T3/T4 (union + widening; regression on null field). ✅
+- Merge-sampling schema, null column retained → T3/T4 (union + widening; `UNKNOWN` bottom sentinel so null-then-typed fields resolve to the concrete type; regressions: null-then-absent in T4, null-then-numeric in T3). ✅
 - Single-split full scan → T7. ✅
 - Base + widening type mapping → T3 (bool/bigint/double/varchar/array/row/decimal-widen). ✅
 - Coercion `lenient` (mismatch→NULL) → T8 `appendValue`. ✅
-- System `_key/_id/_rev` hidden, edge `_from/_to` visible → T4 + T8 `valueFor`. ✅
+- System `_key/_id/_rev` hidden, edge `_from/_to` visible → T4 (schema) + T8 `valueFor` + **T9 edge test** (`SELECT "_from","_to",since FROM knows`). ✅
 - Connector wiring + `SELECT *` exit criterion → T9. ✅
 - `SHOW TABLES` tolerates listing → T9 test asserts it. ✅ (Full fault-tolerant-on-unresolvable-collection, spec §4.2, is only partially exercised in M1; a collection that fails sampling is not force-listed here — **noted as an M1 gap to harden in M2** since M1's happy-path listing meets the milestone exit criterion.)
 
@@ -1686,3 +1773,10 @@ git commit -m "feat: wire ArangoPlugin end-to-end; SELECT * over collections wor
 - Nested `ROW`/`ARRAY`/`DECIMAL` value materialization → M2.
 - Fault-tolerant listing of unresolvable collections (§4.2) → M2.
 - Case-insensitive name matching, TLS/auth, statistics, pushdown, shard splits, schema override/validation sources, `query()` PTF → M2–M6 per their own plans.
+
+## Review resolution (Fable, plan rev 2)
+
+**Blockers:** B1 `getNextSourcePage()`/`SourcePage.create` replaces `getNextPage()` (T8, confirmed 476); B2 `FixedSplitSource(List.of(...))` + `ArangoSplit.getRetainedSizeInBytes()` (T7); B3 JDK 23-vs-24 hard gate in Global Constraints (all integration tasks depend on it).
+**Should-fix:** S1 `trino-maven-plugin` 15 (T1); S2 dropped unused `io.airlift:json` (T1); S3 `LifeCycleManager.shutdown()` + `@PreDestroy` on `ArangoClient.close()` (T2/T9); S4 `HostAndPort.withDefaultPort` host parsing (T2); **S5 `UNKNOWN` bottom sentinel so null-then-typed fields don't degrade to VARCHAR, + regression test** (T3/T4); S6 edge-collection seed + `_from/_to` test (T2/T9); S7 surefire `argLine` for `DistributedQueryRunner` (T1); S8 `getTableHandle` throws `NOT_SUPPORTED` on versioned tables (T5); S9 memoized `resolve()` (T5).
+**Minor:** `List.of` system-attr order (T4); explicit empty-collection behavior (T4); `ArangoDBException`→table-not-found on missing schema (T5); "HTTP/2 + JSON serde" prose (Tech Stack/Driver); public-not-package-visible comment (T2).
+**Verified correct, no change:** 4-arg `getTableHandle`, 6-arg `createPageSource`, `getSplits`, all `Connector`/`Plugin`/`ConnectorFactory` methods, `PageBuilder`/`BlockBuilder` API, `getDisplayName()` strings, Jackson handle serialization, and the full driver-7.x surface (`query(aql, Class, bindVars)` arg order, `getCollections`, `BaseDocument` accessors, `shutdown()`).
