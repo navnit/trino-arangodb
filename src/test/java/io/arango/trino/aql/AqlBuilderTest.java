@@ -32,4 +32,11 @@ class AqlBuilderTest {
         AqlQuery q = new AqlBuilder().buildScan(unconstrainedHandle(), List.of());
         assertThat(q.aql()).isEqualTo("FOR d IN @@col RETURN {}");
     }
+
+    @Test
+    void treatsLiteralDotInColumnNameAsOneAttributeNotANestedPath() {
+        ArangoColumnHandle dotted = new ArangoColumnHandle("a.b", VARCHAR, false, "a.b");
+        AqlQuery q = new AqlBuilder().buildScan(unconstrainedHandle(), List.of(dotted));
+        assertThat(q.aql()).isEqualTo("FOR d IN @@col RETURN {\"a.b\": d[\"a.b\"]}");
+    }
 }

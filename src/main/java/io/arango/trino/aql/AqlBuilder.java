@@ -38,11 +38,7 @@ public class AqlBuilder {
     // values, so a missing intermediate object (e.g. "address" absent) yields null rather
     // than an AQL error, matching Trino's NULL-on-absent-field semantics.
     private static String documentAccessor(String path) {
-        StringBuilder sb = new StringBuilder("d");
-        for (String segment : path.split("\\.")) {
-            sb.append('[').append(quoteAqlString(segment)).append(']');
-        }
-        return sb.toString();
+        return "d[" + quoteAqlString(path) + "]";
     }
 
     private static String quoteAqlString(String value) {
