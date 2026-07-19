@@ -89,7 +89,10 @@ public class ArangoPageSource implements ConnectorPageSource {
                 type.writeSlice(out, utf8Slice(String.valueOf(value)));
             }
             else {
-                // ROW/ARRAY/DECIMAL structured writing lands in M2 hardening; lenient NULL for now
+                // Defensive fallback only: ArangoPageSourceProvider.checkMaterializable rejects
+                // ARRAY/ROW/DECIMAL columns with a loud TrinoException before any query runs,
+                // so a real ARRAY/ROW/DECIMAL value should never reach this branch. This
+                // remains lenient-NULL for any other unanticipated type/value mismatch.
                 out.appendNull();
             }
         }

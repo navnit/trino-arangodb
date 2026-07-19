@@ -4,9 +4,13 @@ import io.arango.trino.aql.AqlBuilder;
 import io.arango.trino.client.ArangoClient;
 import io.arango.trino.handle.ArangoColumnHandle;
 import io.arango.trino.handle.ArangoTableHandle;
+import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.SourcePage;
+import io.trino.spi.type.ArrayType;
+import io.trino.spi.type.DecimalType;
+import io.trino.spi.type.RowType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -16,11 +20,13 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * End-to-end proof (real ArangoDB via {@link TestingArangoServer}, no mocks) that
@@ -150,6 +156,80 @@ class ArangoPageSourceProviderTest {
             }
         }
         assertThat(totalRows).isEqualTo(1);
+        source.close();
+    }
+
+    // Human-requested fix: ARRAY/ROW/DECIMAL columns are correctly schema-inferred but were
+    // previously silently written as NULL for every row by ArangoPageSource.appendValue,
+    // indistinguishable from a genuinely-null field. createPageSource must now reject any
+    // *requested* column of one of these types up front, before the query even runs, so the
+    // failure is loud instead of silently misleading. No real data/query execution is needed
+    // here: the guard must fire before AqlBuilder.buildScan/client.query are ever called, so
+    // an existing shop.items handle with a synthetic unsupported-typed column added to the
+    // projection is sufficient to prove it.
+    @Test
+    void createPageSourceRejectsArrayColumnLoudly() {
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "items", false);
+        List<ColumnHandle> columns = List.of(
+                new ArangoColumnHandle("name", VARCHAR, false),
+                new ArangoColumnHandle("tags", new ArrayType(VARCHAR), false));
+
+        ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder());
+
+        assertThatThrownBy(() -> provider.createPageSource(null, null, null, handle, columns, null))
+                .isInstanceOfSatisfying(TrinoException.class,
+                        e -> assertThat(e.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()));
+    }
+
+    @Test
+    void createPageSourceRejectsRowColumnLoudly() {
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "items", false);
+        List<ColumnHandle> columns = List.of(
+                new ArangoColumnHandle("address", RowType.rowType(RowType.field("city", VARCHAR)), false));
+
+        ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder());
+
+        assertThatThrownBy(() -> provider.createPageSource(null, null, null, handle, columns, null))
+                .isInstanceOfSatisfying(TrinoException.class,
+                        e -> assertThat(e.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()));
+    }
+
+    @Test
+    void createPageSourceRejectsDecimalColumnLoudly() {
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "items", false);
+        List<ColumnHandle> columns = List.of(
+                new ArangoColumnHandle("bigNumber", DecimalType.createDecimalType(38, 0), false));
+
+        ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder());
+
+        assertThatThrownBy(() -> provider.createPageSource(null, null, null, handle, columns, null))
+                .isInstanceOfSatisfying(TrinoException.class,
+                        e -> assertThat(e.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()));
+    }
+
+    // A query that never touches the unsupported column must still work: createPageSource
+    // only inspects the *requested* columns (Trino's actual projection), so an unrelated
+    // array/row/decimal column elsewhere in the table's schema must not block a SELECT of
+    // only supported-typed columns. (shop.items has no such column in this suite's fixture
+    // data, so this reuses the existing supported-typed projection to prove the guard is
+    // scoped to `columns`, not the whole table.)
+    @Test
+    void createPageSourceAllowsQueryThatDoesNotProjectUnsupportedColumn() throws Exception {
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "items", false);
+        List<ColumnHandle> columns = List.of(new ArangoColumnHandle("name", VARCHAR, false));
+
+        ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder());
+        ConnectorPageSource source = provider.createPageSource(null, null, null, handle, columns, null);
+
+        int rows = 0;
+        while (!source.isFinished()) {
+            SourcePage page = source.getNextSourcePage();
+            if (page == null) {
+                continue;
+            }
+            rows += page.getPositionCount();
+        }
+        assertThat(rows).isEqualTo(3);
         source.close();
     }
 
