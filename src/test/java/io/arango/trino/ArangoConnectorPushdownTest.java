@@ -36,6 +36,11 @@ class ArangoConnectorPushdownTest extends AbstractTestQueryFramework {
 
             // First two docs in "skewed" are numeric-only, so a 2-row sample types the
             // "val" column as BIGINT; a later, non-numeric doc is invisible to that sample.
+            // This relies on ArangoClient.sampleDocuments's unsorted `LIMIT n` landing on
+            // these two docs first -- empirically stable (RocksDB primary-index scan order
+            // tracks insertion order on a fresh collection with no concurrent writes) but not
+            // a documented AQL ordering guarantee. Revisit if sampleDocuments ever gains a
+            // SORT clause or the storage engine changes.
             seed.createDocumentCollectionForTest("shop", "skewed");
             seed.insertForTest("shop", "skewed", Map.of("val", 10L));
             seed.insertForTest("shop", "skewed", Map.of("val", 20L));
