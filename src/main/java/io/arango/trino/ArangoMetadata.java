@@ -12,10 +12,23 @@ import io.arango.trino.schema.SchemaResolver;
 import io.arango.trino.schema.SchemaResolver.ArangoColumn;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.*;
+import io.trino.spi.expression.ConnectorExpression;
+import io.trino.spi.expression.FieldDereference;
+import io.trino.spi.expression.Variable;
+import io.trino.spi.predicate.Domain;
+import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.type.ArrayType;
+import io.trino.spi.type.BooleanType;
+import io.trino.spi.type.DecimalType;
+import io.trino.spi.type.RowType;
+import io.trino.spi.type.Type;
 
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
@@ -55,7 +68,8 @@ public class ArangoMetadata implements ConnectorMetadata {
             return client.listCollections(tableName.getSchemaName()).stream()
                     .filter(c -> !c.isSystem() && c.name().equals(tableName.getTableName()))
                     .findFirst()
-                    .map(c -> new ArangoTableHandle(tableName.getSchemaName(), c.name(), c.isEdge()))
+                    .map(c -> new ArangoTableHandle(tableName.getSchemaName(), c.name(), c.isEdge(),
+                            TupleDomain.all(), OptionalLong.empty()))
                     .orElse(null); // null => table not found (Trino throws)
         }
         catch (ArangoDBException e) {
@@ -75,7 +89,7 @@ public class ArangoMetadata implements ConnectorMetadata {
     public ConnectorTableMetadata getTableMetadata(ConnectorSession session, ConnectorTableHandle table) {
         ArangoTableHandle handle = (ArangoTableHandle) table;
         List<ColumnMetadata> columns = resolve(handle).stream()
-                .map(c -> new ArangoColumnHandle(c.name(), c.type(), c.hidden()).toColumnMetadata())
+                .map(c -> new ArangoColumnHandle(c.name(), c.type(), c.hidden(), List.of(c.name())).toColumnMetadata())
                 .collect(ImmutableList.toImmutableList());
         return new ConnectorTableMetadata(handle.schemaTableName(), columns);
     }
@@ -85,7 +99,7 @@ public class ArangoMetadata implements ConnectorMetadata {
         ArangoTableHandle handle = (ArangoTableHandle) table;
         ImmutableMap.Builder<String, ColumnHandle> out = ImmutableMap.builder();
         for (ArangoColumn c : resolve(handle)) {
-            out.put(c.name(), new ArangoColumnHandle(c.name(), c.type(), c.hidden()));
+            out.put(c.name(), new ArangoColumnHandle(c.name(), c.type(), c.hidden(), List.of(c.name())));
         }
         return out.buildOrThrow();
     }
@@ -118,6 +132,178 @@ public class ArangoMetadata implements ConnectorMetadata {
             }
         }
         return out.build();
+    }
+
+    @Override
+    public Optional<ConstraintApplicationResult<ConnectorTableHandle>> applyFilter(
+            ConnectorSession session, ConnectorTableHandle table, Constraint constraint) {
+        ArangoTableHandle handle = (ArangoTableHandle) table;
+        TupleDomain<ColumnHandle> newDomain = constraint.getSummary();
+        if (newDomain.isNone() || newDomain.isAll()) {
+            return Optional.empty();
+        }
+
+        Map<ColumnHandle, Domain> domains = newDomain.getDomains().orElseThrow();
+        ImmutableMap.Builder<ColumnHandle, Domain> pushedBuilder = ImmutableMap.builder();
+        ImmutableMap.Builder<ColumnHandle, Domain> residualBuilder = ImmutableMap.builder();
+        for (Map.Entry<ColumnHandle, Domain> entry : domains.entrySet()) {
+            ArangoColumnHandle column = (ArangoColumnHandle) entry.getKey();
+            Domain domain = entry.getValue();
+            if (isPushable(column.type(), domain)) {
+                pushedBuilder.put(column, domain);
+            }
+            else {
+                residualBuilder.put(column, domain);
+            }
+        }
+
+        TupleDomain<ColumnHandle> pushed = TupleDomain.withColumnDomains(pushedBuilder.buildOrThrow());
+        TupleDomain<ColumnHandle> residual = TupleDomain.withColumnDomains(residualBuilder.buildOrThrow());
+
+        TupleDomain<ColumnHandle> newHandleConstraint = handle.constraint().intersect(pushed);
+        if (newHandleConstraint.equals(handle.constraint())) {
+            return Optional.empty(); // nothing new to push; avoid re-invoking applyFilter forever
+        }
+
+        ArangoTableHandle newHandle = handle.withConstraint(newHandleConstraint);
+        return Optional.of(new ConstraintApplicationResult<>(newHandle, residual, constraint.getExpression(), false));
+    }
+
+    // Only BOOLEAN equality/IN is pushed down; every other predicate stays in Trino's residual
+    // filter. This is deliberately narrow. AQL's `==`/`IN` compare type-strictly and never
+    // coerce, but ArangoPageSource.appendValue coerces leniently on read (String.valueOf() for
+    // VARCHAR, Number.longValue()/doubleValue() for BIGINT/DOUBLE). So for VARCHAR/BIGINT/DOUBLE,
+    // whenever a document's stored value type diverges from the column's sampled/inferred type,
+    // the AQL-side raw comparison and Trino's own post-coercion comparison can silently disagree
+    // -- and because the predicate was reported fully pushed, no residual re-check catches it
+    // (rows vanish or wrongly match, with no error). BOOLEAN is the one case that provably cannot
+    // diverge: a non-Boolean stored value coerces to Trino NULL (appendValue's else-branch) AND
+    // fails AQL's strict `== <bool>` -- both sides always exclude, so the pushed and residual
+    // answers agree. VARCHAR/BIGINT/DOUBLE (equality, IN, and ranges alike) are therefore left
+    // entirely residual, for the same reason IS NULL/IS NOT NULL already are (see the null-check
+    // comment below and Global Constraints). Found and resolved during the M2 final whole-branch
+    // review; earlier revisions wrongly assumed equality/IN was safe to push unguarded for every
+    // type.
+    private static boolean isPushable(Type type, Domain domain) {
+        if (domain.isAll()) {
+            return false;
+        }
+        // Excludes IS NULL / IS NOT NULL (and any null-allowing domain): AQL's `== null`/`!= null`
+        // test the raw stored value, while ArangoPageSource.appendValue leniently coerces any
+        // type-mismatched value to Trino NULL. A value outside SchemaResolver's sample (or one the
+        // inferred type doesn't fit) would answer these predicates differently in AQL than in
+        // Trino, silently dropping or including rows. Left residual, Trino re-applies them
+        // post-coercion.
+        if (domain.isNullAllowed()) {
+            return false;
+        }
+        if (domain.getValues().isAll()) {
+            return false;
+        }
+        return type.equals(BooleanType.BOOLEAN) && domain.getValues().isDiscreteSet();
+    }
+
+    @Override
+    public Optional<LimitApplicationResult<ConnectorTableHandle>> applyLimit(
+            ConnectorSession session, ConnectorTableHandle table, long limit) {
+        ArangoTableHandle handle = (ArangoTableHandle) table;
+        if (handle.limit().isPresent() && handle.limit().getAsLong() <= limit) {
+            return Optional.empty();
+        }
+        // M2 is single-split always (ArangoSplitManager emits exactly one ArangoSplit per
+        // table), so a pushed AQL LIMIT is always exactly satisfied: limitGuaranteed=true.
+        return Optional.of(new LimitApplicationResult<>(handle.withLimit(limit), true, false));
+    }
+
+    @Override
+    public Optional<ProjectionApplicationResult<ConnectorTableHandle>> applyProjection(
+            ConnectorSession session, ConnectorTableHandle table,
+            List<ConnectorExpression> projections, Map<String, ColumnHandle> assignments) {
+        ImmutableList.Builder<ConnectorExpression> newProjections = ImmutableList.builder();
+        ImmutableList.Builder<Assignment> newAssignments = ImmutableList.builder();
+        Map<String, ArangoColumnHandle> deduped = new LinkedHashMap<>();
+        boolean progress = false;
+
+        for (ConnectorExpression projection : projections) {
+            Optional<ArangoColumnHandle> resolved;
+            if (projection instanceof Variable variable) {
+                resolved = assignments.get(variable.getName()) instanceof ArangoColumnHandle existing
+                        ? Optional.of(existing) : Optional.empty();
+            }
+            else {
+                resolved = resolveDereference(projection, assignments);
+                progress |= resolved.isPresent();
+            }
+            if (resolved.isEmpty()) {
+                return Optional.empty(); // an expression we can't represent -- decline the whole call
+            }
+            ArangoColumnHandle column = resolved.get();
+            ArangoColumnHandle priorAssignment = deduped.get(column.name());
+            if (priorAssignment != null && !priorAssignment.path().equals(column.path())) {
+                // A synthetic dereference name (baseName + "$" + fieldName) collided with a
+                // distinct column's name -- can't safely represent both under one Assignment
+                // name, so decline the whole call rather than silently dropping one. Fits
+                // applyProjection's existing all-or-nothing contract (see the resolved.isEmpty()
+                // decline above).
+                return Optional.empty();
+            }
+            boolean isNewColumn = priorAssignment == null;
+            ArangoColumnHandle canonical = deduped.computeIfAbsent(column.name(), key -> column);
+            if (isNewColumn) {
+                newAssignments.add(new Assignment(canonical.name(), canonical, canonical.type()));
+            }
+            newProjections.add(new Variable(canonical.name(), canonical.type()));
+        }
+
+        if (!progress) {
+            return Optional.empty(); // pure passthrough of existing columns: nothing new to report
+        }
+        return Optional.of(new ProjectionApplicationResult<>(table, newProjections.build(), newAssignments.build(), false));
+    }
+
+    // Walks a (possibly chained) FieldDereference down to its root Variable, resolving each
+    // field index against the actual RowType field names so the result is a genuine multi-
+    // segment AQL document path (e.g. List.of("address", "city")). Declines (Optional.empty())
+    // whenever the chain doesn't root in a known column, indexes into a non-ROW type, hits an
+    // anonymous row field, or bottoms out at a still-structured (ROW/ARRAY/DECIMAL) leaf --
+    // those stay Trino-evaluated, consistent with checkMaterializable's existing ARRAY/ROW/
+    // DECIMAL rejection. Segments are never joined into a String, so a field name that itself
+    // contains a literal "." is not ambiguous (see AqlBuilder.documentAccessor).
+    private static Optional<ArangoColumnHandle> resolveDereference(
+            ConnectorExpression expression, Map<String, ColumnHandle> assignments) {
+        List<Integer> fieldIndexes = new ArrayList<>();
+        ConnectorExpression current = expression;
+        while (current instanceof FieldDereference deref) {
+            fieldIndexes.add(0, deref.getField());
+            current = deref.getTarget();
+        }
+        if (!(current instanceof Variable base) || fieldIndexes.isEmpty()) {
+            return Optional.empty();
+        }
+        if (!(assignments.get(base.getName()) instanceof ArangoColumnHandle baseColumn)) {
+            return Optional.empty();
+        }
+
+        Type currentType = baseColumn.type();
+        List<String> path = new ArrayList<>(baseColumn.path());
+        StringBuilder name = new StringBuilder(baseColumn.name());
+        for (int fieldIndex : fieldIndexes) {
+            if (!(currentType instanceof RowType rowType)) {
+                return Optional.empty();
+            }
+            RowType.Field field = rowType.getFields().get(fieldIndex);
+            if (field.getName().isEmpty()) {
+                return Optional.empty();
+            }
+            String fieldName = field.getName().get();
+            path.add(fieldName);
+            name.append('$').append(fieldName);
+            currentType = field.getType();
+        }
+        if (currentType instanceof RowType || currentType instanceof ArrayType || currentType instanceof DecimalType) {
+            return Optional.empty();
+        }
+        return Optional.of(new ArangoColumnHandle(name.toString(), currentType, false, path));
     }
 
     private List<ArangoColumn> resolve(ArangoTableHandle handle) {

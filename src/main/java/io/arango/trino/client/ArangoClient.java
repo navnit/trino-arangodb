@@ -3,7 +3,6 @@ package io.arango.trino.client;
 import com.arangodb.ArangoCursor;
 import com.arangodb.ArangoDB;
 import com.arangodb.Protocol;
-import com.arangodb.entity.BaseDocument;
 import com.arangodb.entity.CollectionEntity;
 import com.arangodb.entity.CollectionType;
 import com.arangodb.model.CollectionCreateOptions;
@@ -60,8 +59,9 @@ public class ArangoClient implements AutoCloseable {
         return out.build();
     }
 
-    public ArangoCursor<BaseDocument> query(String database, String aql, Map<String, Object> bindVars) {
-        return arango.db(database).query(aql, BaseDocument.class, bindVars);
+    @SuppressWarnings("unchecked")
+    public ArangoCursor<Map> query(String database, String aql, Map<String, Object> bindVars) {
+        return arango.db(database).query(aql, Map.class, bindVars);
     }
 
     // ---- test-only seeding helpers (public so cross-package tests in T9 can call them) ----

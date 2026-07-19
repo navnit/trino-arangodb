@@ -1,7 +1,6 @@
 package io.arango.trino;
 
 import com.arangodb.ArangoCursor;
-import com.arangodb.entity.BaseDocument;
 import io.arango.trino.handle.ArangoColumnHandle;
 import io.trino.spi.Page;
 import io.trino.spi.PageBuilder;
@@ -21,12 +20,12 @@ public class ArangoPageSource implements ConnectorPageSource {
 
     private final List<ArangoColumnHandle> columns;
     private final List<Type> types;
-    private final ArangoCursor<BaseDocument> cursor;
+    private final ArangoCursor<Map> cursor;
     private final PageBuilder pageBuilder;
     private boolean finished;
     private long completedBytes;
 
-    public ArangoPageSource(ArangoCursor<BaseDocument> cursor, List<ArangoColumnHandle> columns) {
+    public ArangoPageSource(ArangoCursor<Map> cursor, List<ArangoColumnHandle> columns) {
         this.cursor = requireNonNull(cursor, "cursor is null");
         this.columns = List.copyOf(columns);
         this.types = columns.stream().map(ArangoColumnHandle::type).toList();
@@ -37,14 +36,13 @@ public class ArangoPageSource implements ConnectorPageSource {
     public SourcePage getNextSourcePage() {
         int rows = 0;
         while (rows < ROWS_PER_PAGE && cursor.hasNext()) {
-            BaseDocument doc = cursor.next();
-            Map<String, Object> props = doc.getProperties(); // user fields
+            @SuppressWarnings("unchecked")
+            Map<String, Object> row = cursor.next();
             pageBuilder.declarePosition();
             for (int i = 0; i < columns.size(); i++) {
                 ArangoColumnHandle col = columns.get(i);
                 BlockBuilder out = pageBuilder.getBlockBuilder(i);
-                Object value = valueFor(doc, col.name(), props);
-                appendValue(out, types.get(i), value);
+                appendValue(out, types.get(i), row.get(col.name()));
             }
             rows++;
         }
@@ -58,15 +56,6 @@ public class ArangoPageSource implements ConnectorPageSource {
         completedBytes += page.getSizeInBytes();
         pageBuilder.reset();
         return SourcePage.create(page);
-    }
-
-    private static Object valueFor(BaseDocument doc, String name, Map<String, Object> props) {
-        return switch (name) {
-            case "_key" -> doc.getKey();
-            case "_id" -> doc.getId();
-            case "_rev" -> doc.getRevision();
-            default -> props.get(name); // includes _from/_to for edges (driver exposes via attributes)
-        };
     }
 
     // lenient coercion: mismatched/absent value -> NULL

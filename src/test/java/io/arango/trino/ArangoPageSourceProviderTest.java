@@ -8,6 +8,7 @@ import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.SourcePage;
+import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.RowType;
@@ -19,6 +20,7 @@ import org.junit.jupiter.api.TestInstance;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
 
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.BigintType.BIGINT;
@@ -30,12 +32,17 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * End-to-end proof (real ArangoDB via {@link TestingArangoServer}, no mocks) that
- * {@link ArangoPageSourceProvider}/{@link ArangoPageSource} actually run an AQL cursor and
- * build correctly-typed Trino pages. T8's brief defers exhaustive read-path coverage to T9's
- * query-runner tests, but this class exists to make the page-building machinery itself --
- * per-type value coercion, the _key/_id/_rev special columns, edge _from/_to exposure via
- * BaseDocument properties, and lenient NULL-on-missing-field behavior -- fail loudly here if
- * it regresses, rather than waiting for T9.
+ * {@link ArangoPageSourceProvider}/{@link ArangoPageSource} actually run an AQL cursor and build
+ * correctly-typed Trino pages. This is M1-era read-path and materialization-guard coverage: it
+ * makes the page-building machinery fail loudly here if it regresses -- per-type value coercion,
+ * the _key/_id special-column mapping, edge _from/_to round-tripping, lenient
+ * NULL-on-missing-field behavior, and {@link ArangoPageSourceProvider}'s up-front rejection of
+ * ARRAY/ROW/DECIMAL-typed columns (scoped to the columns Trino actually projects). M2 touched this
+ * class only incidentally (the handle-constructor signature change and the column-path
+ * {@code List<String>} migration); it does not itself exercise pushdown, whose behavior is covered
+ * by {@link ArangoConnectorPushdownTest} and {@code AqlBuilderTest}. Note the read path now returns
+ * an AQL {@code RETURN {...}} {@code Map} rather than a driver {@code BaseDocument}, after M2's
+ * read-path migration.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ArangoPageSourceProviderTest {
@@ -72,14 +79,14 @@ class ArangoPageSourceProviderTest {
 
     @Test
     void scanReturnsTypedValuesAndNullsForMissingFields() throws Exception {
-        ArangoTableHandle handle = new ArangoTableHandle("shop", "items", false);
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "items", false, TupleDomain.all(), OptionalLong.empty());
         List<ColumnHandle> columns = List.of(
-                new ArangoColumnHandle("_key", VARCHAR, false),
-                new ArangoColumnHandle("_id", VARCHAR, false),
-                new ArangoColumnHandle("name", VARCHAR, false),
-                new ArangoColumnHandle("qty", BIGINT, false),
-                new ArangoColumnHandle("price", DOUBLE, false),
-                new ArangoColumnHandle("active", BOOLEAN, false));
+                new ArangoColumnHandle("_key", VARCHAR, false, List.of("_key")),
+                new ArangoColumnHandle("_id", VARCHAR, false, List.of("_id")),
+                new ArangoColumnHandle("name", VARCHAR, false, List.of("name")),
+                new ArangoColumnHandle("qty", BIGINT, false, List.of("qty")),
+                new ArangoColumnHandle("price", DOUBLE, false, List.of("price")),
+                new ArangoColumnHandle("active", BOOLEAN, false, List.of("active")));
 
         ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder());
         ConnectorPageSource source = provider.createPageSource(null, null, null, handle, columns, null);
@@ -131,12 +138,12 @@ class ArangoPageSourceProviderTest {
 
     @Test
     void edgeFromAndToColumnsRoundTripThroughDriverProperties() throws Exception {
-        ArangoTableHandle handle = new ArangoTableHandle("shop", "knows", true);
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "knows", true, TupleDomain.all(), OptionalLong.empty());
         List<ColumnHandle> columns = List.of(
-                new ArangoColumnHandle("_key", VARCHAR, false),
-                new ArangoColumnHandle("_from", VARCHAR, false),
-                new ArangoColumnHandle("_to", VARCHAR, false),
-                new ArangoColumnHandle("weight", BIGINT, false));
+                new ArangoColumnHandle("_key", VARCHAR, false, List.of("_key")),
+                new ArangoColumnHandle("_from", VARCHAR, false, List.of("_from")),
+                new ArangoColumnHandle("_to", VARCHAR, false, List.of("_to")),
+                new ArangoColumnHandle("weight", BIGINT, false, List.of("weight")));
 
         ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder());
         ConnectorPageSource source = provider.createPageSource(null, null, null, handle, columns, null);
@@ -169,10 +176,10 @@ class ArangoPageSourceProviderTest {
     // projection is sufficient to prove it.
     @Test
     void createPageSourceRejectsArrayColumnLoudly() {
-        ArangoTableHandle handle = new ArangoTableHandle("shop", "items", false);
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "items", false, TupleDomain.all(), OptionalLong.empty());
         List<ColumnHandle> columns = List.of(
-                new ArangoColumnHandle("name", VARCHAR, false),
-                new ArangoColumnHandle("tags", new ArrayType(VARCHAR), false));
+                new ArangoColumnHandle("name", VARCHAR, false, List.of("name")),
+                new ArangoColumnHandle("tags", new ArrayType(VARCHAR), false, List.of("tags")));
 
         ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder());
 
@@ -183,9 +190,9 @@ class ArangoPageSourceProviderTest {
 
     @Test
     void createPageSourceRejectsRowColumnLoudly() {
-        ArangoTableHandle handle = new ArangoTableHandle("shop", "items", false);
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "items", false, TupleDomain.all(), OptionalLong.empty());
         List<ColumnHandle> columns = List.of(
-                new ArangoColumnHandle("address", RowType.rowType(RowType.field("city", VARCHAR)), false));
+                new ArangoColumnHandle("address", RowType.rowType(RowType.field("city", VARCHAR)), false, List.of("address")));
 
         ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder());
 
@@ -196,9 +203,9 @@ class ArangoPageSourceProviderTest {
 
     @Test
     void createPageSourceRejectsDecimalColumnLoudly() {
-        ArangoTableHandle handle = new ArangoTableHandle("shop", "items", false);
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "items", false, TupleDomain.all(), OptionalLong.empty());
         List<ColumnHandle> columns = List.of(
-                new ArangoColumnHandle("bigNumber", DecimalType.createDecimalType(38, 0), false));
+                new ArangoColumnHandle("bigNumber", DecimalType.createDecimalType(38, 0), false, List.of("bigNumber")));
 
         ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder());
 
@@ -215,8 +222,8 @@ class ArangoPageSourceProviderTest {
     // scoped to `columns`, not the whole table.)
     @Test
     void createPageSourceAllowsQueryThatDoesNotProjectUnsupportedColumn() throws Exception {
-        ArangoTableHandle handle = new ArangoTableHandle("shop", "items", false);
-        List<ColumnHandle> columns = List.of(new ArangoColumnHandle("name", VARCHAR, false));
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "items", false, TupleDomain.all(), OptionalLong.empty());
+        List<ColumnHandle> columns = List.of(new ArangoColumnHandle("name", VARCHAR, false, List.of("name")));
 
         ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder());
         ConnectorPageSource source = provider.createPageSource(null, null, null, handle, columns, null);
