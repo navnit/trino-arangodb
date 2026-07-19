@@ -12,10 +12,12 @@ import io.arango.trino.schema.SchemaResolver;
 import io.arango.trino.schema.SchemaResolver.ArangoColumn;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.*;
+import io.trino.spi.predicate.TupleDomain;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
@@ -55,7 +57,8 @@ public class ArangoMetadata implements ConnectorMetadata {
             return client.listCollections(tableName.getSchemaName()).stream()
                     .filter(c -> !c.isSystem() && c.name().equals(tableName.getTableName()))
                     .findFirst()
-                    .map(c -> new ArangoTableHandle(tableName.getSchemaName(), c.name(), c.isEdge()))
+                    .map(c -> new ArangoTableHandle(tableName.getSchemaName(), c.name(), c.isEdge(),
+                            TupleDomain.all(), OptionalLong.empty()))
                     .orElse(null); // null => table not found (Trino throws)
         }
         catch (ArangoDBException e) {

@@ -8,6 +8,7 @@ import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.SourcePage;
+import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.RowType;
@@ -19,6 +20,7 @@ import org.junit.jupiter.api.TestInstance;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
 
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.BigintType.BIGINT;
@@ -72,7 +74,7 @@ class ArangoPageSourceProviderTest {
 
     @Test
     void scanReturnsTypedValuesAndNullsForMissingFields() throws Exception {
-        ArangoTableHandle handle = new ArangoTableHandle("shop", "items", false);
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "items", false, TupleDomain.all(), OptionalLong.empty());
         List<ColumnHandle> columns = List.of(
                 new ArangoColumnHandle("_key", VARCHAR, false, "_key"),
                 new ArangoColumnHandle("_id", VARCHAR, false, "_id"),
@@ -131,7 +133,7 @@ class ArangoPageSourceProviderTest {
 
     @Test
     void edgeFromAndToColumnsRoundTripThroughDriverProperties() throws Exception {
-        ArangoTableHandle handle = new ArangoTableHandle("shop", "knows", true);
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "knows", true, TupleDomain.all(), OptionalLong.empty());
         List<ColumnHandle> columns = List.of(
                 new ArangoColumnHandle("_key", VARCHAR, false, "_key"),
                 new ArangoColumnHandle("_from", VARCHAR, false, "_from"),
@@ -169,7 +171,7 @@ class ArangoPageSourceProviderTest {
     // projection is sufficient to prove it.
     @Test
     void createPageSourceRejectsArrayColumnLoudly() {
-        ArangoTableHandle handle = new ArangoTableHandle("shop", "items", false);
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "items", false, TupleDomain.all(), OptionalLong.empty());
         List<ColumnHandle> columns = List.of(
                 new ArangoColumnHandle("name", VARCHAR, false, "name"),
                 new ArangoColumnHandle("tags", new ArrayType(VARCHAR), false, "tags"));
@@ -183,7 +185,7 @@ class ArangoPageSourceProviderTest {
 
     @Test
     void createPageSourceRejectsRowColumnLoudly() {
-        ArangoTableHandle handle = new ArangoTableHandle("shop", "items", false);
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "items", false, TupleDomain.all(), OptionalLong.empty());
         List<ColumnHandle> columns = List.of(
                 new ArangoColumnHandle("address", RowType.rowType(RowType.field("city", VARCHAR)), false, "address"));
 
@@ -196,7 +198,7 @@ class ArangoPageSourceProviderTest {
 
     @Test
     void createPageSourceRejectsDecimalColumnLoudly() {
-        ArangoTableHandle handle = new ArangoTableHandle("shop", "items", false);
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "items", false, TupleDomain.all(), OptionalLong.empty());
         List<ColumnHandle> columns = List.of(
                 new ArangoColumnHandle("bigNumber", DecimalType.createDecimalType(38, 0), false, "bigNumber"));
 
@@ -215,7 +217,7 @@ class ArangoPageSourceProviderTest {
     // scoped to `columns`, not the whole table.)
     @Test
     void createPageSourceAllowsQueryThatDoesNotProjectUnsupportedColumn() throws Exception {
-        ArangoTableHandle handle = new ArangoTableHandle("shop", "items", false);
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "items", false, TupleDomain.all(), OptionalLong.empty());
         List<ColumnHandle> columns = List.of(new ArangoColumnHandle("name", VARCHAR, false, "name"));
 
         ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder());

@@ -13,12 +13,14 @@ import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.ConnectorTableVersion;
 import io.trino.spi.connector.PointerType;
 import io.trino.spi.connector.SchemaTableName;
+import io.trino.spi.predicate.TupleDomain;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
@@ -245,7 +247,7 @@ class ArangoMetadataTest {
         CountingSchemaResolver resolver = new CountingSchemaResolver(
                 List.of(new ArangoColumn("name", VARCHAR, false)));
         ArangoMetadata metadata = new ArangoMetadata(null, resolver);
-        ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false);
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
 
         ConnectorTableMetadata tableMetadata = metadata.getTableMetadata(null, handle);
         Map<String, ColumnHandle> columnHandles = metadata.getColumnHandles(null, handle);

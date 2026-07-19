@@ -27,19 +27,15 @@ public record ArangoTableHandle(
         requireNonNull(limit, "limit is null");
     }
 
-    public ArangoTableHandle(String schema, String table, boolean edge) {
-        this(schema, table, edge, TupleDomain.all(), OptionalLong.empty());
-    }
-
     public SchemaTableName schemaTableName() {
         return new SchemaTableName(schema, table);
     }
 
-    public ArangoTableHandle withConstraint(TupleDomain<ColumnHandle> constraint) {
-        return new ArangoTableHandle(schema, table, edge, constraint, limit);
+    public ArangoTableHandle withConstraint(TupleDomain<ColumnHandle> newConstraint) {
+        return new ArangoTableHandle(schema, table, edge, newConstraint, limit);
     }
 
-    public ArangoTableHandle withLimit(OptionalLong limit) {
-        return new ArangoTableHandle(schema, table, edge, constraint, limit);
+    public ArangoTableHandle withLimit(long newLimit) {
+        return new ArangoTableHandle(schema, table, edge, constraint, OptionalLong.of(newLimit));
     }
 }
