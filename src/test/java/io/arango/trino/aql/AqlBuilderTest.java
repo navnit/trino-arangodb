@@ -98,6 +98,10 @@ class AqlBuilderTest {
                 "FOR d IN @@col FILTER (IS_NUMBER(d[\"age\"]) AND (d[\"age\"] >= @v0 AND d[\"age\"] < @v1)) RETURN {\"age\": d[\"age\"]}");
     }
 
+    // No rendersIsNullFilter/rendersIsNotNullFilter tests: IS NULL/IS NOT NULL are never pushed
+    // (see ArangoMetadata.isPushable), so renderDomain never receives an only-null/not-null
+    // domain -- there is no reachable input shape for this method to render that way.
+
     @Test
     void rendersVarcharEqualityByConvertingSliceToString() {
         ArangoColumnHandle name = new ArangoColumnHandle("name", VARCHAR, false, "name");
