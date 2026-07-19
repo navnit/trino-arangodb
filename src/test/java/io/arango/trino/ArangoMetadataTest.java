@@ -4,15 +4,20 @@ import com.arangodb.ArangoDBException;
 import com.arangodb.entity.ErrorEntity;
 import io.arango.trino.client.ArangoClient;
 import io.arango.trino.client.ArangoClient.CollectionInfo;
+import io.arango.trino.handle.ArangoColumnHandle;
 import io.arango.trino.handle.ArangoTableHandle;
 import io.arango.trino.schema.SchemaResolver;
 import io.arango.trino.schema.SchemaResolver.ArangoColumn;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
+import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.ConnectorTableVersion;
+import io.trino.spi.connector.Constraint;
+import io.trino.spi.connector.ConstraintApplicationResult;
 import io.trino.spi.connector.PointerType;
 import io.trino.spi.connector.SchemaTableName;
+import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import org.junit.jupiter.api.Test;
 
@@ -255,5 +260,48 @@ class ArangoMetadataTest {
         assertThat(tableMetadata.getColumns()).hasSize(1);
         assertThat(columnHandles).containsKey("name");
         assertThat(resolver.calls.get()).isEqualTo(1);
+    }
+
+    @Test
+    void applyFilterPushesEqualityAndDropsFromResidual() {
+        ArangoMetadata metadata = new ArangoMetadata(null, null);
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
+        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, "age");
+        Constraint constraint = new Constraint(TupleDomain.withColumnDomains(
+                Map.of(age, Domain.singleValue(BIGINT, 30L))));
+
+        Optional<ConstraintApplicationResult<ConnectorTableHandle>> result = metadata.applyFilter(null, handle, constraint);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getRemainingFilter().isAll()).isTrue();
+        ArangoTableHandle newHandle = (ArangoTableHandle) result.get().getHandle();
+        assertThat(newHandle.constraint().getDomains().orElseThrow()).containsEntry(age, Domain.singleValue(BIGINT, 30L));
+    }
+
+    @Test
+    void applyFilterKeepsNullableRestrictedDomainInResidual() {
+        ArangoMetadata metadata = new ArangoMetadata(null, null);
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
+        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, "age");
+        Domain nullableRestricted = Domain.create(io.trino.spi.predicate.ValueSet.of(BIGINT, 30L), true);
+        Constraint constraint = new Constraint(TupleDomain.withColumnDomains(Map.of(age, nullableRestricted)));
+
+        Optional<ConstraintApplicationResult<ConnectorTableHandle>> result = metadata.applyFilter(null, handle, constraint);
+
+        assertThat(result).isEmpty();
+    }
+
+    @Test
+    void applyFilterReturnsEmptyWhenNothingNewToPush() {
+        ArangoMetadata metadata = new ArangoMetadata(null, null);
+        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, "age");
+        TupleDomain<ColumnHandle> alreadyPushed = TupleDomain.withColumnDomains(
+                Map.of(age, Domain.singleValue(BIGINT, 30L)));
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, alreadyPushed, OptionalLong.empty());
+        Constraint sameConstraint = new Constraint(alreadyPushed);
+
+        Optional<ConstraintApplicationResult<ConnectorTableHandle>> result = metadata.applyFilter(null, handle, sameConstraint);
+
+        assertThat(result).isEmpty();
     }
 }

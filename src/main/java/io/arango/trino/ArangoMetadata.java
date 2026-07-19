@@ -12,7 +12,13 @@ import io.arango.trino.schema.SchemaResolver;
 import io.arango.trino.schema.SchemaResolver.ArangoColumn;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.*;
+import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.type.BigintType;
+import io.trino.spi.type.BooleanType;
+import io.trino.spi.type.DoubleType;
+import io.trino.spi.type.Type;
+import io.trino.spi.type.VarcharType;
 
 import java.util.List;
 import java.util.Map;
@@ -121,6 +127,69 @@ public class ArangoMetadata implements ConnectorMetadata {
             }
         }
         return out.build();
+    }
+
+    @Override
+    public Optional<ConstraintApplicationResult<ConnectorTableHandle>> applyFilter(
+            ConnectorSession session, ConnectorTableHandle table, Constraint constraint) {
+        ArangoTableHandle handle = (ArangoTableHandle) table;
+        TupleDomain<ColumnHandle> newDomain = constraint.getSummary();
+        if (newDomain.isNone() || newDomain.isAll()) {
+            return Optional.empty();
+        }
+
+        Map<ColumnHandle, Domain> domains = newDomain.getDomains().orElseThrow();
+        ImmutableMap.Builder<ColumnHandle, Domain> pushedBuilder = ImmutableMap.builder();
+        ImmutableMap.Builder<ColumnHandle, Domain> residualBuilder = ImmutableMap.builder();
+        for (Map.Entry<ColumnHandle, Domain> entry : domains.entrySet()) {
+            ArangoColumnHandle column = (ArangoColumnHandle) entry.getKey();
+            Domain domain = entry.getValue();
+            if (isPushable(column.type(), domain)) {
+                pushedBuilder.put(column, domain);
+            }
+            else {
+                residualBuilder.put(column, domain);
+            }
+        }
+
+        TupleDomain<ColumnHandle> pushed = TupleDomain.withColumnDomains(pushedBuilder.buildOrThrow());
+        TupleDomain<ColumnHandle> residual = TupleDomain.withColumnDomains(residualBuilder.buildOrThrow());
+
+        TupleDomain<ColumnHandle> newHandleConstraint = handle.constraint().intersect(pushed);
+        if (newHandleConstraint.equals(handle.constraint())) {
+            return Optional.empty(); // nothing new to push; avoid re-invoking applyFilter forever
+        }
+
+        ArangoTableHandle newHandle = handle.withConstraint(newHandleConstraint);
+        return Optional.of(new ConstraintApplicationResult<>(newHandle, residual, constraint.getExpression(), false));
+    }
+
+    // Per spec §6.1: equality/IN is safe to push unguarded for every type (AQL's `==`/`IN`
+    // are type-strict, never coerce). Numeric range needs an IS_NUMBER guard (AqlBuilder adds
+    // it) because AQL's cross-type total order would otherwise let a non-numeric value stored
+    // under the same field silently satisfy a numeric `>`/`<`. String range is never pushed
+    // (ICU collation vs Trino codepoint-order mismatch, spec §6.1). DECIMAL/ARRAY/ROW are
+    // never pushed -- materialization itself is unsupported (ArangoPageSourceProvider
+    // .checkMaterializable) and DECIMAL bind-var marshaling is untested. A domain that allows
+    // both null AND a restricted value set ("x = 5 OR x IS NULL") is not modeled in M2 and
+    // stays in the residual.
+    private static boolean isPushable(Type type, Domain domain) {
+        if (domain.isAll()) {
+            return false;
+        }
+        if (domain.isOnlyNull()) {
+            return true;
+        }
+        if (domain.isNullAllowed()) {
+            return false;
+        }
+        if (domain.getValues().isAll()) {
+            return true;
+        }
+        if (type instanceof VarcharType || type.equals(BooleanType.BOOLEAN)) {
+            return domain.getValues().isDiscreteSet();
+        }
+        return type.equals(BigintType.BIGINT) || type.equals(DoubleType.DOUBLE);
     }
 
     private List<ArangoColumn> resolve(ArangoTableHandle handle) {
