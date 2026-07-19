@@ -448,4 +448,60 @@ class ArangoMetadataTest {
 
         assertThat(result).isEmpty();
     }
+
+    @Test
+    void applyProjectionDeclinesOnSyntheticNameCollisionWithRealColumn() {
+        ArangoMetadata metadata = new ArangoMetadata(null, null);
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
+        RowType addressType = RowType.rowType(RowType.field("city", VARCHAR));
+        ArangoColumnHandle addressColumn = new ArangoColumnHandle("address", addressType, false, List.of("address"));
+        // A real top-level column whose literal name collides with the synthetic name
+        // resolveDereference would produce for address.city ("address" + "$" + "city").
+        ArangoColumnHandle collidingColumn = new ArangoColumnHandle("address$city", VARCHAR, false, List.of("address$city"));
+
+        Variable addressVar = new Variable("address_0", addressType);
+        FieldDereference cityDeref = new FieldDereference(VARCHAR, addressVar, 0);
+        Variable collidingVar = new Variable("col_0", VARCHAR);
+        Map<String, ColumnHandle> assignments = Map.of(
+                "address_0", addressColumn,
+                "col_0", collidingColumn);
+
+        Optional<ProjectionApplicationResult<ConnectorTableHandle>> result =
+                metadata.applyProjection(null, handle, List.of(cityDeref, collidingVar), assignments);
+
+        assertThat(result).isEmpty();
+    }
+
+    @Test
+    void applyProjectionDeclinesWhenRootVariableIsUnresolvable() {
+        ArangoMetadata metadata = new ArangoMetadata(null, null);
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
+        RowType addressType = RowType.rowType(RowType.field("city", VARCHAR));
+        Variable unknownVar = new Variable("ghost_0", addressType);
+        FieldDereference cityDeref = new FieldDereference(VARCHAR, unknownVar, 0);
+        Map<String, ColumnHandle> assignments = Map.of();
+
+        Optional<ProjectionApplicationResult<ConnectorTableHandle>> result =
+                metadata.applyProjection(null, handle, List.of(cityDeref), assignments);
+
+        assertThat(result).isEmpty();
+    }
+
+    @Test
+    void applyProjectionDeclinesWhenDereferenceLeafIsStructuredType() {
+        ArangoMetadata metadata = new ArangoMetadata(null, null);
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
+        RowType geoType = RowType.rowType(RowType.field("lat", DOUBLE), RowType.field("lng", DOUBLE));
+        RowType addressType = RowType.rowType(RowType.field("geo", geoType), RowType.field("city", VARCHAR));
+        ArangoColumnHandle addressColumn = new ArangoColumnHandle("address", addressType, false, List.of("address"));
+
+        Variable addressVar = new Variable("address_0", addressType);
+        FieldDereference geoDeref = new FieldDereference(geoType, addressVar, 0);
+        Map<String, ColumnHandle> assignments = Map.of("address_0", addressColumn);
+
+        Optional<ProjectionApplicationResult<ConnectorTableHandle>> result =
+                metadata.applyProjection(null, handle, List.of(geoDeref), assignments);
+
+        assertThat(result).isEmpty();
+    }
 }

@@ -237,7 +237,16 @@ public class ArangoMetadata implements ConnectorMetadata {
                 return Optional.empty(); // an expression we can't represent -- decline the whole call
             }
             ArangoColumnHandle column = resolved.get();
-            boolean isNewColumn = !deduped.containsKey(column.name());
+            ArangoColumnHandle existing = deduped.get(column.name());
+            if (existing != null && !existing.path().equals(column.path())) {
+                // A synthetic dereference name (baseName + "$" + fieldName) collided with a
+                // distinct column's name -- can't safely represent both under one Assignment
+                // name, so decline the whole call rather than silently dropping one. Fits
+                // applyProjection's existing all-or-nothing contract (see the resolved.isEmpty()
+                // decline above).
+                return Optional.empty();
+            }
+            boolean isNewColumn = existing == null;
             ArangoColumnHandle canonical = deduped.computeIfAbsent(column.name(), key -> column);
             if (isNewColumn) {
                 newAssignments.add(new Assignment(canonical.name(), canonical, canonical.type()));
