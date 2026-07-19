@@ -488,6 +488,34 @@ class ArangoMetadataTest {
     }
 
     @Test
+    void applyProjectionMergesTwoDereferenceChainsToTheSameNestedColumn() {
+        ArangoMetadata metadata = new ArangoMetadata(null, null);
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
+        RowType addressType = RowType.rowType(RowType.field("city", VARCHAR));
+        ArangoColumnHandle addressColumn = new ArangoColumnHandle("address", addressType, false, List.of("address"));
+        // Two distinct Variables, both bound to the same base column, dereferencing the same
+        // field -- e.g. SELECT address.city, address.city. Same name AND same path: the
+        // collision guard must not fire, and the two projections must collapse to one Assignment.
+        Variable addressVarA = new Variable("address_0", addressType);
+        Variable addressVarB = new Variable("address_1", addressType);
+        FieldDereference cityDerefA = new FieldDereference(VARCHAR, addressVarA, 0);
+        FieldDereference cityDerefB = new FieldDereference(VARCHAR, addressVarB, 0);
+        Map<String, ColumnHandle> assignments = Map.of(
+                "address_0", addressColumn,
+                "address_1", addressColumn);
+
+        Optional<ProjectionApplicationResult<ConnectorTableHandle>> result =
+                metadata.applyProjection(null, handle, List.of(cityDerefA, cityDerefB), assignments);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getAssignments()).hasSize(1);
+        Assignment pushed = result.get().getAssignments().get(0);
+        assertThat(pushed.getVariable()).isEqualTo("address$city");
+        assertThat(((ArangoColumnHandle) pushed.getColumn()).path()).isEqualTo(List.of("address", "city"));
+        assertThat(result.get().getProjections()).hasSize(2);
+    }
+
+    @Test
     void applyProjectionDeclinesWhenDereferenceLeafIsStructuredType() {
         ArangoMetadata metadata = new ArangoMetadata(null, null);
         ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
