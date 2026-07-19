@@ -26,6 +26,7 @@ public class SchemaResolver {
     private final TypeMapper typeMapper;
     private final ArangoConfig config;
 
+    @com.google.inject.Inject
     public SchemaResolver(ArangoClient client, TypeMapper typeMapper, ArangoConfig config) {
         this.client = client;
         this.typeMapper = typeMapper;

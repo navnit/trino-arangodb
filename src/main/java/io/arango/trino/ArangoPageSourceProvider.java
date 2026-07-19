@@ -13,6 +13,7 @@ public class ArangoPageSourceProvider implements ConnectorPageSourceProvider {
     private final ArangoClient client;
     private final AqlBuilder aqlBuilder;
 
+    @com.google.inject.Inject
     public ArangoPageSourceProvider(ArangoClient client, AqlBuilder aqlBuilder) {
         this.client = client;
         this.aqlBuilder = aqlBuilder;

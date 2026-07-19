@@ -95,6 +95,48 @@
             <version>${dep.trino.version}</version>
             <scope>test</scope>
         </dependency>
+        <!-- Not in brief's Step 3 verbatim listing: forced additions, discovered running T9's
+             DistributedQueryRunner-based test (the first task to exercise trino-testing's
+             TestingDiscoveryServer). trino-testing:476 needs io.airlift.discovery:discovery-server,
+             which trino-root:476's dependencyManagement pins to 1.37 (an intentionally separate,
+             much older release line for that one artifact), but discovery-server:1.37's own POM
+             pulls jaxrs/http-client/jmx/trace-token at ITS OWN old transitive version (247), while
+             trino-testing's other direct io.airlift dependencies (http-server, node, json, stats,
+             testing, tracing, concurrent, security) resolve at 336. In the real Trino build this
+             skew is closed by trino-root importing io.airlift:bom:336, which forces the whole
+             io.airlift group to 336 project-wide; this standalone pom (per the brief, no parent)
+             has no such import. Without it, jaxrs:247's JaxrsModule references
+             io.airlift.http.server.TheServlet, a binding annotation that only exists in
+             http-server:247 (verified by inspecting both jars); mediation picks http-server:336 for
+             the rest of the graph, so TheServlet is absent at runtime and DistributedQueryRunner's
+             TestingDiscoveryServer fails with NoClassDefFoundError. Rather than importing the whole
+             io.airlift:bom (which would also re-pin transitive deps of our own bootstrap:293/
+             configuration:293, e.g. log/log-manager/secrets-spi, away from the versions those two
+             modules were actually built and tested against in T1-T8), only jaxrs/http-client/jmx are
+             pinned to 336 as direct depth-1 test dependencies so mediation prefers them over
+             discovery-server's depth-3 request for 247 (trace-token has no 336 release: verified
+             it is absent from both Maven Central and io.airlift:bom:336, and http-client:336's own
+             POM confirms it no longer depends on trace-token at all, so nothing needs to pull it in
+             once http-client is upgraded). Verified via mvn dependency:tree: no other io.airlift
+             artifact resolves at 247. -->
+        <dependency>
+            <groupId>io.airlift</groupId>
+            <artifactId>jaxrs</artifactId>
+            <version>336</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.airlift</groupId>
+            <artifactId>http-client</artifactId>
+            <version>336</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.airlift</groupId>
+            <artifactId>jmx</artifactId>
+            <version>336</version>
+            <scope>test</scope>
+        </dependency>
         <dependency>
             <groupId>io.airlift</groupId>
             <artifactId>configuration</artifactId>
