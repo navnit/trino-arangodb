@@ -16,6 +16,17 @@
         <dep.arango.version>7.13.0</dep.arango.version>
         <dep.testcontainers.version>1.20.4</dep.testcontainers.version>
         <dep.junit.version>5.11.3</dep.junit.version>
+        <!-- Docker Remote API version handed to the Testcontainers-shaded docker-java
+             client via the surefire api.version system property (see the long note on
+             that property below). Kept as a property so it can be overridden per
+             environment: no single hardcoded value works everywhere, because the shaded
+             client does not negotiate and Docker keeps raising its *minimum* accepted
+             API version. The default 1.51 suits a modern local Docker Engine (e.g. 29.x,
+             which reports max 1.54 and rejects the shaded client's un-negotiated 1.32
+             default as too old); a CI runner on an older Engine rejects 1.51 as too new,
+             so CI passes the daemon's own reported max via -Ddocker.api.version=... See
+             .github/workflows/ci.yml. -->
+        <docker.api.version>1.51</docker.api.version>
     </properties>
 
     <dependencies>
@@ -229,7 +240,7 @@
                          task-2-report.md for verification that this alone (no env vars) makes the
                          Testcontainers-backed ArangoClientTest pass. -->
                     <systemPropertyVariables>
-                        <api.version>1.51</api.version>
+                        <api.version>${docker.api.version}</api.version>
                     </systemPropertyVariables>
                 </configuration>
             </plugin>
