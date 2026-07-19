@@ -71,36 +71,12 @@ class AqlBuilderTest {
         assertThat(q.bindVars()).containsEntry("v0", List.of(30L, 40L));
     }
 
-    @Test
-    void rendersGuardedRangeFilter() {
-        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, List.of("age"));
-        Domain range = Domain.create(
-                io.trino.spi.predicate.ValueSet.ofRanges(io.trino.spi.predicate.Range.greaterThan(BIGINT, 30L)),
-                false);
-        AqlQuery q = new AqlBuilder().buildScan(
-                handleWithConstraint(ImmutableMap.of(age, range)),
-                List.of(age));
-        assertThat(q.aql()).isEqualTo(
-                "FOR d IN @@col FILTER (IS_NUMBER(d[\"age\"]) AND d[\"age\"] > @v0) RETURN {\"age\": d[\"age\"]}");
-        assertThat(q.bindVars()).containsEntry("v0", 30L);
-    }
-
-    @Test
-    void rendersTwoSidedRangeFilterWithoutRedundantParens() {
-        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, List.of("age"));
-        Domain range = Domain.create(
-                io.trino.spi.predicate.ValueSet.ofRanges(io.trino.spi.predicate.Range.range(BIGINT, 20L, true, 30L, false)),
-                false);
-        AqlQuery q = new AqlBuilder().buildScan(
-                handleWithConstraint(ImmutableMap.of(age, range)),
-                List.of(age));
-        assertThat(q.aql()).isEqualTo(
-                "FOR d IN @@col FILTER (IS_NUMBER(d[\"age\"]) AND (d[\"age\"] >= @v0 AND d[\"age\"] < @v1)) RETURN {\"age\": d[\"age\"]}");
-    }
-
-    // No rendersIsNullFilter/rendersIsNotNullFilter tests: IS NULL/IS NOT NULL are never pushed
-    // (see ArangoMetadata.isPushable), so renderDomain never receives an only-null/not-null
-    // domain -- there is no reachable input shape for this method to render that way.
+    // No range-filter tests: after the M2 final-review narrowing, ArangoMetadata.isPushable never
+    // classifies a range domain (of any type) as pushable, so renderDomain's range-rendering code
+    // was removed as dead. Likewise no rendersIsNullFilter/rendersIsNotNullFilter tests: IS NULL /
+    // IS NOT NULL are never pushed either -- there is no reachable input shape for renderDomain to
+    // render those ways. The equality/IN discrete-set rendering below stays reachable (BOOLEAN
+    // equality/IN is the one predicate still pushed) and is exercised generically here.
 
     @Test
     void rendersVarcharEqualityByConvertingSliceToString() {

@@ -18,13 +18,10 @@ import io.trino.spi.expression.Variable;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.ArrayType;
-import io.trino.spi.type.BigintType;
 import io.trino.spi.type.BooleanType;
 import io.trino.spi.type.DecimalType;
-import io.trino.spi.type.DoubleType;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
-import io.trino.spi.type.VarcharType;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -172,34 +169,38 @@ public class ArangoMetadata implements ConnectorMetadata {
         return Optional.of(new ConstraintApplicationResult<>(newHandle, residual, constraint.getExpression(), false));
     }
 
-    // Per spec §6.1: equality/IN is safe to push unguarded for every type (AQL's `==`/`IN`
-    // are type-strict, never coerce). Numeric range needs an IS_NUMBER guard (AqlBuilder adds
-    // it) because AQL's cross-type total order would otherwise let a non-numeric value stored
-    // under the same field silently satisfy a numeric `>`/`<`. String range is never pushed
-    // (ICU collation vs Trino codepoint-order mismatch, spec §6.1). DECIMAL/ARRAY/ROW are
-    // never pushed -- materialization itself is unsupported (ArangoPageSourceProvider
-    // .checkMaterializable) and DECIMAL bind-var marshaling is untested. A domain that allows
-    // both null AND a restricted value set ("x = 5 OR x IS NULL") is not modeled in M2 and
-    // stays in the residual.
+    // Only BOOLEAN equality/IN is pushed down; every other predicate stays in Trino's residual
+    // filter. This is deliberately narrow. AQL's `==`/`IN` compare type-strictly and never
+    // coerce, but ArangoPageSource.appendValue coerces leniently on read (String.valueOf() for
+    // VARCHAR, Number.longValue()/doubleValue() for BIGINT/DOUBLE). So for VARCHAR/BIGINT/DOUBLE,
+    // whenever a document's stored value type diverges from the column's sampled/inferred type,
+    // the AQL-side raw comparison and Trino's own post-coercion comparison can silently disagree
+    // -- and because the predicate was reported fully pushed, no residual re-check catches it
+    // (rows vanish or wrongly match, with no error). BOOLEAN is the one case that provably cannot
+    // diverge: a non-Boolean stored value coerces to Trino NULL (appendValue's else-branch) AND
+    // fails AQL's strict `== <bool>` -- both sides always exclude, so the pushed and residual
+    // answers agree. VARCHAR/BIGINT/DOUBLE (equality, IN, and ranges alike) are therefore left
+    // entirely residual, for the same reason IS NULL/IS NOT NULL already are (see the null-check
+    // comment below and Global Constraints). Found and resolved during the M2 final whole-branch
+    // review; earlier revisions wrongly assumed equality/IN was safe to push unguarded for every
+    // type.
     private static boolean isPushable(Type type, Domain domain) {
-        // IS NULL / IS NOT NULL are never pushed: AQL's `== null` / `!= null` test the raw
-        // stored value, while ArangoPageSource.appendValue leniently coerces any type-mismatched
-        // value to Trino NULL. A value outside SchemaResolver's sample (or one that didn't fit the
-        // inferred type) would answer these predicates differently in AQL than in Trino, silently
-        // dropping or including rows. Left residual, Trino re-applies them post-coercion.
         if (domain.isAll()) {
             return false;
         }
+        // Excludes IS NULL / IS NOT NULL (and any null-allowing domain): AQL's `== null`/`!= null`
+        // test the raw stored value, while ArangoPageSource.appendValue leniently coerces any
+        // type-mismatched value to Trino NULL. A value outside SchemaResolver's sample (or one the
+        // inferred type doesn't fit) would answer these predicates differently in AQL than in
+        // Trino, silently dropping or including rows. Left residual, Trino re-applies them
+        // post-coercion.
         if (domain.isNullAllowed()) {
             return false;
         }
         if (domain.getValues().isAll()) {
             return false;
         }
-        if (type instanceof VarcharType || type.equals(BooleanType.BOOLEAN)) {
-            return domain.getValues().isDiscreteSet();
-        }
-        return type.equals(BigintType.BIGINT) || type.equals(DoubleType.DOUBLE);
+        return type.equals(BooleanType.BOOLEAN) && domain.getValues().isDiscreteSet();
     }
 
     @Override

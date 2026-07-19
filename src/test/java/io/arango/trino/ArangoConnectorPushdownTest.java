@@ -45,6 +45,15 @@ class ArangoConnectorPushdownTest extends AbstractTestQueryFramework {
             seed.insertForTest("shop", "skewed", Map.of("val", 10L));
             seed.insertForTest("shop", "skewed", Map.of("val", 20L));
             seed.insertForTest("shop", "skewed", Map.of("val", "not-a-number"));
+
+            // "code" holds a numeric 42 in one doc and the string "42" in another, so it infers
+            // as VARCHAR (TypeMapper.merge widens an incompatible String/number pair to VARCHAR).
+            // Both docs are within the default sample size, so the inference is order-independent.
+            // Used by the regression test proving the removed VARCHAR-equality pushdown no longer
+            // silently drops the numeric-42 row.
+            seed.createDocumentCollectionForTest("shop", "mixed");
+            seed.insertForTest("shop", "mixed", Map.of("label", "num", "code", 42L));
+            seed.insertForTest("shop", "mixed", Map.of("label", "str", "code", "42"));
         }
 
         QueryRunner queryRunner = DistributedQueryRunner.builder(
@@ -71,14 +80,33 @@ class ArangoConnectorPushdownTest extends AbstractTestQueryFramework {
     }
 
     @Test
-    void equalityFilterIsFullyPushedDown() {
-        assertThat(query("SELECT name FROM arango.shop.users WHERE age = 30")).isFullyPushedDown();
+    void bigintEqualityFilterIsResidualButStillCorrect() {
+        // BIGINT equality is no longer pushed (only BOOLEAN equality/IN remains pushable -- see
+        // ArangoMetadata.isPushable). A raw AQL `==` never coerces, but ArangoPageSource
+        // .appendValue coerces any Number to long on read, so the two could disagree for an
+        // out-of-sample stored value; left residual, Trino re-applies it post-coercion. Still
+        // correct: age = 30 matches only 'ada'.
+        assertThat(query("SELECT name FROM arango.shop.users WHERE age = 30"))
+                .matches("VALUES VARCHAR 'ada'")
+                .isNotFullyPushedDown(FilterNode.class);
     }
 
     @Test
-    void numericRangeFilterIsFullyPushedDownAndCorrect() {
+    void bigintRangeFilterIsResidualButStillCorrect() {
+        // BIGINT range is no longer pushed either (isPushable only pushes BOOLEAN discrete sets).
+        // Left residual, Trino applies `age > 28` itself, correctly returning 'ada' and 'bob'.
         assertThat(query("SELECT name FROM arango.shop.users WHERE age > 28"))
                 .matches("VALUES (VARCHAR 'ada'), (VARCHAR 'bob')")
+                .isNotFullyPushedDown(FilterNode.class);
+    }
+
+    @Test
+    void booleanEqualityFilterIsFullyPushedDown() {
+        // BOOLEAN equality/IN is the one predicate still pushed down: a non-Boolean stored value
+        // coerces to Trino NULL AND fails AQL's strict `== true`, so the AQL-side and Trino-side
+        // answers can never diverge. Fully pushed and correct: active = true matches 'ada','cleo'.
+        assertThat(query("SELECT name FROM arango.shop.users WHERE active = true"))
+                .matches("VALUES (VARCHAR 'ada'), (VARCHAR 'cleo')")
                 .isFullyPushedDown();
     }
 
@@ -121,9 +149,31 @@ class ArangoConnectorPushdownTest extends AbstractTestQueryFramework {
     }
 
     @Test
-    void mixedTypeGuardExcludesNonNumericValueUnderSampleSkew() {
+    void residualFilterIsCorrectOnSampleTypeSkewedColumn() {
+        // arangoskew's "val" samples as BIGINT from its first 2 (sample-size=2) numeric docs; a
+        // 3rd doc's "val" is the string "not-a-number", invisible to the sample. BIGINT ranges are
+        // no longer pushed at all (only BOOLEAN discrete sets are -- see ArangoMetadata.isPushable),
+        // so there is no AQL-side guard doing the work here: the whole `val > 5` predicate is
+        // residual, and Trino applies it post-coercion. ArangoPageSource.appendValue coerces the
+        // non-numeric "val" to NULL, which fails `> 5`, so the row is correctly excluded. Same
+        // correct result (10, 20) as before -- only the reason changed (residual-always, not an
+        // AQL IS_NUMBER guard).
         MaterializedResult result = getQueryRunner().execute(
                 "SELECT val FROM arangoskew.shop.skewed WHERE val > 5");
         assertThat(result.getOnlyColumnAsSet()).containsExactlyInAnyOrder(10L, 20L);
+    }
+
+    @Test
+    void varcharEqualityIsResidualSoMixedTypeRowIsNotSilentlyDropped() {
+        // Regression proof for the M2 final-review Critical fix. shop.mixed.code holds a numeric 42
+        // in one doc and the string "42" in another, so it infers as VARCHAR. Under the old
+        // VARCHAR-equality pushdown, `code = '42'` rendered as a type-strict AQL `d["code"] == "42"`,
+        // which the numeric-42 doc fails (number != string in AQL) -- that row silently vanished,
+        // even though ArangoPageSource.appendValue stringifies 42 -> "42" for Trino, which should
+        // match. Now VARCHAR equality is residual: Trino reads both rows, coerces both to "42", and
+        // the predicate matches both. So the result correctly includes the previously-dropped row.
+        assertThat(query("SELECT label FROM arango.shop.mixed WHERE code = '42'"))
+                .matches("VALUES (VARCHAR 'num'), (VARCHAR 'str')")
+                .isNotFullyPushedDown(FilterNode.class);
     }
 }

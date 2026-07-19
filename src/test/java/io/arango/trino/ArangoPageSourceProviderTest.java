@@ -32,12 +32,17 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * End-to-end proof (real ArangoDB via {@link TestingArangoServer}, no mocks) that
- * {@link ArangoPageSourceProvider}/{@link ArangoPageSource} actually run an AQL cursor and
- * build correctly-typed Trino pages. T8's brief defers exhaustive read-path coverage to T9's
- * query-runner tests, but this class exists to make the page-building machinery itself --
- * per-type value coercion, the _key/_id/_rev special columns, edge _from/_to exposure via
- * BaseDocument properties, and lenient NULL-on-missing-field behavior -- fail loudly here if
- * it regresses, rather than waiting for T9.
+ * {@link ArangoPageSourceProvider}/{@link ArangoPageSource} actually run an AQL cursor and build
+ * correctly-typed Trino pages. This is M1-era read-path and materialization-guard coverage: it
+ * makes the page-building machinery fail loudly here if it regresses -- per-type value coercion,
+ * the _key/_id special-column mapping, edge _from/_to round-tripping, lenient
+ * NULL-on-missing-field behavior, and {@link ArangoPageSourceProvider}'s up-front rejection of
+ * ARRAY/ROW/DECIMAL-typed columns (scoped to the columns Trino actually projects). M2 touched this
+ * class only incidentally (the handle-constructor signature change and the column-path
+ * {@code List<String>} migration); it does not itself exercise pushdown, whose behavior is covered
+ * by {@link ArangoConnectorPushdownTest} and {@code AqlBuilderTest}. Note the read path now returns
+ * an AQL {@code RETURN {...}} {@code Map} rather than a driver {@code BaseDocument}, after M2's
+ * read-path migration.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ArangoPageSourceProviderTest {

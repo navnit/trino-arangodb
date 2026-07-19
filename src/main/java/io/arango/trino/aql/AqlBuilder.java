@@ -5,7 +5,6 @@ import io.arango.trino.handle.ArangoColumnHandle;
 import io.arango.trino.handle.ArangoTableHandle;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.predicate.Domain;
-import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.ValueSet;
 
 import java.util.ArrayList;
@@ -41,9 +40,12 @@ public class AqlBuilder {
     }
 
     // Only reachable for domain shapes ArangoMetadata.applyFilter already classified as
-    // pushable, so this method trusts its input rather than re-verifying types: equality/IN
-    // (any type) or a genuine range (BIGINT/DOUBLE only). IS NULL / IS NOT NULL are never
-    // pushed (see ArangoMetadata.isPushable) and so never reach this method.
+    // pushable. After the M2 final-review narrowing, that is exactly a BOOLEAN discrete set
+    // (equality or IN); VARCHAR/BIGINT/DOUBLE equality/IN, every range predicate, and IS NULL /
+    // IS NOT NULL are all left residual (see ArangoMetadata.isPushable) and never reach this
+    // method. The discrete-set rendering below stays generic -- single value -> `==`, multiple
+    // -> `IN`, for any value type -- rather than hardcoding BOOLEAN. A non-discrete-set (range)
+    // domain is unreachable here, so it is rejected loudly rather than silently mis-rendered.
     private static String renderDomain(ArangoColumnHandle column, Domain domain, Map<String, Object> bindVars, int[] counter) {
         String accessor = documentAccessor(column.path());
         ValueSet values = domain.getValues();
@@ -57,31 +59,8 @@ public class AqlBuilder {
             String v = bindValue(bindVars, counter, converted);
             return accessor + " IN @" + v;
         }
-        List<String> rangeClauses = new ArrayList<>();
-        for (Range range : values.getRanges().getOrderedRanges()) {
-            rangeClauses.add(renderRange(accessor, range, bindVars, counter));
-        }
-        String combined = rangeClauses.size() == 1
-                ? rangeClauses.get(0)
-                : "(" + String.join(" OR ", rangeClauses) + ")";
-        return "IS_NUMBER(" + accessor + ") AND " + combined;
-    }
-
-    private static String renderRange(String accessor, Range range, Map<String, Object> bindVars, int[] counter) {
-        if (range.isSingleValue()) {
-            String v = bindValue(bindVars, counter, toBindValue(range.getSingleValue()));
-            return accessor + " == @" + v;
-        }
-        List<String> parts = new ArrayList<>();
-        if (!range.isLowUnbounded()) {
-            String v = bindValue(bindVars, counter, toBindValue(range.getLowBoundedValue()));
-            parts.add(accessor + (range.isLowInclusive() ? " >= @" : " > @") + v);
-        }
-        if (!range.isHighUnbounded()) {
-            String v = bindValue(bindVars, counter, toBindValue(range.getHighBoundedValue()));
-            parts.add(accessor + (range.isHighInclusive() ? " <= @" : " < @") + v);
-        }
-        return parts.size() == 1 ? parts.get(0) : "(" + String.join(" AND ", parts) + ")";
+        throw new IllegalStateException(
+                "renderDomain only receives discrete-set domains from ArangoMetadata.isPushable; got " + domain);
     }
 
     // Trino represents VARCHAR predicate values as io.airlift.slice.Slice, not String; the

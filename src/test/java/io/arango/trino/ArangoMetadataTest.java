@@ -38,6 +38,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -271,7 +272,30 @@ class ArangoMetadataTest {
     }
 
     @Test
-    void applyFilterPushesEqualityAndDropsFromResidual() {
+    void applyFilterPushesBooleanEqualityAndDropsFromResidual() {
+        // BOOLEAN equality is the one predicate still pushed down (only coercion-safe case; see
+        // ArangoMetadata.isPushable). It moves onto the handle constraint and leaves no residual.
+        ArangoMetadata metadata = new ArangoMetadata(null, null);
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
+        ArangoColumnHandle active = new ArangoColumnHandle("active", BOOLEAN, false, List.of("active"));
+        Constraint constraint = new Constraint(TupleDomain.withColumnDomains(
+                Map.of(active, Domain.singleValue(BOOLEAN, true))));
+
+        Optional<ConstraintApplicationResult<ConnectorTableHandle>> result = metadata.applyFilter(null, handle, constraint);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getRemainingFilter().isAll()).isTrue();
+        ArangoTableHandle newHandle = (ArangoTableHandle) result.get().getHandle();
+        assertThat(newHandle.constraint().getDomains().orElseThrow()).containsEntry(active, Domain.singleValue(BOOLEAN, true));
+    }
+
+    @Test
+    void applyFilterKeepsBigintEqualityInResidual() {
+        // Regression lock for the M2 final-review fix: BIGINT (and VARCHAR/DOUBLE) equality is no
+        // longer pushed, because AQL's type-strict `==` can disagree with ArangoPageSource
+        // .appendValue's lenient Number->long coercion for an out-of-sample stored value. With
+        // nothing pushable, applyFilter has no new constraint to add and returns empty (Trino keeps
+        // the whole predicate in its residual filter).
         ArangoMetadata metadata = new ArangoMetadata(null, null);
         ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
         ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, List.of("age"));
@@ -280,10 +304,7 @@ class ArangoMetadataTest {
 
         Optional<ConstraintApplicationResult<ConnectorTableHandle>> result = metadata.applyFilter(null, handle, constraint);
 
-        assertThat(result).isPresent();
-        assertThat(result.get().getRemainingFilter().isAll()).isTrue();
-        ArangoTableHandle newHandle = (ArangoTableHandle) result.get().getHandle();
-        assertThat(newHandle.constraint().getDomains().orElseThrow()).containsEntry(age, Domain.singleValue(BIGINT, 30L));
+        assertThat(result).isEmpty();
     }
 
     @Test
@@ -331,10 +352,13 @@ class ArangoMetadataTest {
 
     @Test
     void applyFilterReturnsEmptyWhenNothingNewToPush() {
+        // Fixed-point guard: the pushable BOOLEAN domain is already on the handle, so re-invoking
+        // applyFilter with the same constraint adds nothing new and returns empty (prevents an
+        // infinite applyFilter loop). Uses BOOLEAN because that is the only type still pushed.
         ArangoMetadata metadata = new ArangoMetadata(null, null);
-        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, List.of("age"));
+        ArangoColumnHandle active = new ArangoColumnHandle("active", BOOLEAN, false, List.of("active"));
         TupleDomain<ColumnHandle> alreadyPushed = TupleDomain.withColumnDomains(
-                Map.of(age, Domain.singleValue(BIGINT, 30L)));
+                Map.of(active, Domain.singleValue(BOOLEAN, true)));
         ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, alreadyPushed, OptionalLong.empty());
         Constraint sameConstraint = new Constraint(alreadyPushed);
 
