@@ -358,4 +358,27 @@ class ArangoMetadataTest {
 
         assertThat(result).isEmpty();
     }
+
+    @Test
+    void applyLimitPushesTighterLimitOverExistingLooserOne() {
+        ArangoMetadata metadata = new ArangoMetadata(null, null);
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.of(10L));
+
+        Optional<LimitApplicationResult<ConnectorTableHandle>> result = metadata.applyLimit(null, handle, 5L);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().isLimitGuaranteed()).isTrue();
+        ArangoTableHandle newHandle = (ArangoTableHandle) result.get().getHandle();
+        assertThat(newHandle.limit()).isEqualTo(OptionalLong.of(5L));
+    }
+
+    @Test
+    void applyLimitDeclinesWhenExistingLimitEqualsRequestedLimit() {
+        ArangoMetadata metadata = new ArangoMetadata(null, null);
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.of(10L));
+
+        Optional<LimitApplicationResult<ConnectorTableHandle>> result = metadata.applyLimit(null, handle, 10L);
+
+        assertThat(result).isEmpty();
+    }
 }
