@@ -292,6 +292,36 @@ class ArangoMetadataTest {
     }
 
     @Test
+    void applyFilterKeepsIsNullInResidual() {
+        // AQL's `== null` tests the raw stored value; ArangoPageSource.appendValue leniently
+        // coerces type-mismatched values to Trino NULL. A value outside SchemaResolver's sample
+        // (or one the inferred type doesn't fit) would answer this predicate differently in AQL
+        // than in Trino, so IS NULL must stay residual rather than being pushed.
+        ArangoMetadata metadata = new ArangoMetadata(null, null);
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
+        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, "age");
+        Constraint constraint = new Constraint(TupleDomain.withColumnDomains(
+                Map.of(age, Domain.onlyNull(BIGINT))));
+
+        Optional<ConstraintApplicationResult<ConnectorTableHandle>> result = metadata.applyFilter(null, handle, constraint);
+
+        assertThat(result).isEmpty();
+    }
+
+    @Test
+    void applyFilterKeepsIsNotNullInResidual() {
+        ArangoMetadata metadata = new ArangoMetadata(null, null);
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
+        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, "age");
+        Constraint constraint = new Constraint(TupleDomain.withColumnDomains(
+                Map.of(age, Domain.notNull(BIGINT))));
+
+        Optional<ConstraintApplicationResult<ConnectorTableHandle>> result = metadata.applyFilter(null, handle, constraint);
+
+        assertThat(result).isEmpty();
+    }
+
+    @Test
     void applyFilterReturnsEmptyWhenNothingNewToPush() {
         ArangoMetadata metadata = new ArangoMetadata(null, null);
         ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, "age");

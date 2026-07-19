@@ -99,24 +99,6 @@ class AqlBuilderTest {
     }
 
     @Test
-    void rendersIsNullFilter() {
-        ArangoColumnHandle name = new ArangoColumnHandle("name", VARCHAR, false, "name");
-        AqlQuery q = new AqlBuilder().buildScan(
-                handleWithConstraint(ImmutableMap.of(name, Domain.onlyNull(VARCHAR))),
-                List.of(name));
-        assertThat(q.aql()).isEqualTo("FOR d IN @@col FILTER (d[\"name\"] == null) RETURN {\"name\": d[\"name\"]}");
-    }
-
-    @Test
-    void rendersIsNotNullFilter() {
-        ArangoColumnHandle name = new ArangoColumnHandle("name", VARCHAR, false, "name");
-        AqlQuery q = new AqlBuilder().buildScan(
-                handleWithConstraint(ImmutableMap.of(name, Domain.notNull(VARCHAR))),
-                List.of(name));
-        assertThat(q.aql()).isEqualTo("FOR d IN @@col FILTER (d[\"name\"] != null) RETURN {\"name\": d[\"name\"]}");
-    }
-
-    @Test
     void rendersVarcharEqualityByConvertingSliceToString() {
         ArangoColumnHandle name = new ArangoColumnHandle("name", VARCHAR, false, "name");
         AqlQuery q = new AqlBuilder().buildScan(

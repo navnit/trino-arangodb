@@ -174,17 +174,19 @@ public class ArangoMetadata implements ConnectorMetadata {
     // both null AND a restricted value set ("x = 5 OR x IS NULL") is not modeled in M2 and
     // stays in the residual.
     private static boolean isPushable(Type type, Domain domain) {
+        // IS NULL / IS NOT NULL are never pushed: AQL's `== null` / `!= null` test the raw
+        // stored value, while ArangoPageSource.appendValue leniently coerces any type-mismatched
+        // value to Trino NULL. A value outside SchemaResolver's sample (or one that didn't fit the
+        // inferred type) would answer these predicates differently in AQL than in Trino, silently
+        // dropping or including rows. Left residual, Trino re-applies them post-coercion.
         if (domain.isAll()) {
             return false;
-        }
-        if (domain.isOnlyNull()) {
-            return true;
         }
         if (domain.isNullAllowed()) {
             return false;
         }
         if (domain.getValues().isAll()) {
-            return true;
+            return false;
         }
         if (type instanceof VarcharType || type.equals(BooleanType.BOOLEAN)) {
             return domain.getValues().isDiscreteSet();

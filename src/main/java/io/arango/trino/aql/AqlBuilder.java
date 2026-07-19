@@ -39,16 +39,11 @@ public class AqlBuilder {
     }
 
     // Only reachable for domain shapes ArangoMetadata.applyFilter already classified as
-    // pushable, so this method trusts its input rather than re-verifying types: IS NULL,
-    // IS NOT NULL, equality/IN (any type), or a genuine range (BIGINT/DOUBLE only).
+    // pushable, so this method trusts its input rather than re-verifying types: equality/IN
+    // (any type) or a genuine range (BIGINT/DOUBLE only). IS NULL / IS NOT NULL are never
+    // pushed (see ArangoMetadata.isPushable) and so never reach this method.
     private static String renderDomain(ArangoColumnHandle column, Domain domain, Map<String, Object> bindVars, int[] counter) {
         String accessor = documentAccessor(column.path());
-        if (domain.isOnlyNull()) {
-            return accessor + " == null";
-        }
-        if (!domain.isNullAllowed() && domain.getValues().isAll()) {
-            return accessor + " != null";
-        }
         ValueSet values = domain.getValues();
         if (values.isDiscreteSet()) {
             List<Object> discrete = values.getDiscreteSet();
