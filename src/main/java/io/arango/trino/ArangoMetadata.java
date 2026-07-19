@@ -18,9 +18,16 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
+import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 
 public class ArangoMetadata implements ConnectorMetadata {
+    // ArangoDB's own documented error number for "database not found" (stable across the
+    // driver). Only this specific error should be translated into Trino's "not found" signal;
+    // any other ArangoDBException (auth failure, network partition, etc.) is a real error and
+    // must propagate as such rather than being silently misreported as "table doesn't exist".
+    private static final int ERROR_DATABASE_NOT_FOUND = 1228;
+
     private final ArangoClient client;
     private final SchemaResolver schemaResolver;
     // M1: unbounded per-connector memoization so one SELECT samples a collection once;
@@ -52,8 +59,16 @@ public class ArangoMetadata implements ConnectorMetadata {
                     .orElse(null); // null => table not found (Trino throws)
         }
         catch (ArangoDBException e) {
-            return null; // schema (database) does not exist => table not found
+            if (isDatabaseNotFound(e)) {
+                return null; // schema (database) does not exist => table not found
+            }
+            throw new TrinoException(GENERIC_INTERNAL_ERROR,
+                    "Failed to look up table '%s' in ArangoDB".formatted(tableName), e);
         }
+    }
+
+    private static boolean isDatabaseNotFound(ArangoDBException e) {
+        return e.getErrorNum() != null && e.getErrorNum() == ERROR_DATABASE_NOT_FOUND;
     }
 
     @Override
@@ -85,7 +100,18 @@ public class ArangoMetadata implements ConnectorMetadata {
         ImmutableList.Builder<SchemaTableName> out = ImmutableList.builder();
         List<String> schemas = schemaName.map(List::of).orElseGet(() -> client.listDatabases());
         for (String schema : schemas) {
-            for (CollectionInfo c : client.listCollections(schema)) {
+            List<CollectionInfo> collections;
+            try {
+                collections = client.listCollections(schema);
+            }
+            catch (ArangoDBException e) {
+                if (isDatabaseNotFound(e)) {
+                    continue; // schema (database) does not exist => zero tables in it
+                }
+                throw new TrinoException(GENERIC_INTERNAL_ERROR,
+                        "Failed to list tables in schema '%s' in ArangoDB".formatted(schema), e);
+            }
+            for (CollectionInfo c : collections) {
                 if (!c.isSystem()) {
                     out.add(new SchemaTableName(schema, c.name()));
                 }
