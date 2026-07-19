@@ -6,13 +6,15 @@ import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.type.Type;
 
+import java.util.List;
+
 import static java.util.Objects.requireNonNull;
 
 public record ArangoColumnHandle(
         @JsonProperty("name") String name,
         @JsonProperty("type") Type type,
         @JsonProperty("hidden") boolean hidden,
-        @JsonProperty("path") String path)
+        @JsonProperty("path") List<String> path)
         implements ColumnHandle {
 
     @JsonCreator

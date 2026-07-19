@@ -76,12 +76,12 @@ class ArangoPageSourceProviderTest {
     void scanReturnsTypedValuesAndNullsForMissingFields() throws Exception {
         ArangoTableHandle handle = new ArangoTableHandle("shop", "items", false, TupleDomain.all(), OptionalLong.empty());
         List<ColumnHandle> columns = List.of(
-                new ArangoColumnHandle("_key", VARCHAR, false, "_key"),
-                new ArangoColumnHandle("_id", VARCHAR, false, "_id"),
-                new ArangoColumnHandle("name", VARCHAR, false, "name"),
-                new ArangoColumnHandle("qty", BIGINT, false, "qty"),
-                new ArangoColumnHandle("price", DOUBLE, false, "price"),
-                new ArangoColumnHandle("active", BOOLEAN, false, "active"));
+                new ArangoColumnHandle("_key", VARCHAR, false, List.of("_key")),
+                new ArangoColumnHandle("_id", VARCHAR, false, List.of("_id")),
+                new ArangoColumnHandle("name", VARCHAR, false, List.of("name")),
+                new ArangoColumnHandle("qty", BIGINT, false, List.of("qty")),
+                new ArangoColumnHandle("price", DOUBLE, false, List.of("price")),
+                new ArangoColumnHandle("active", BOOLEAN, false, List.of("active")));
 
         ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder());
         ConnectorPageSource source = provider.createPageSource(null, null, null, handle, columns, null);
@@ -135,10 +135,10 @@ class ArangoPageSourceProviderTest {
     void edgeFromAndToColumnsRoundTripThroughDriverProperties() throws Exception {
         ArangoTableHandle handle = new ArangoTableHandle("shop", "knows", true, TupleDomain.all(), OptionalLong.empty());
         List<ColumnHandle> columns = List.of(
-                new ArangoColumnHandle("_key", VARCHAR, false, "_key"),
-                new ArangoColumnHandle("_from", VARCHAR, false, "_from"),
-                new ArangoColumnHandle("_to", VARCHAR, false, "_to"),
-                new ArangoColumnHandle("weight", BIGINT, false, "weight"));
+                new ArangoColumnHandle("_key", VARCHAR, false, List.of("_key")),
+                new ArangoColumnHandle("_from", VARCHAR, false, List.of("_from")),
+                new ArangoColumnHandle("_to", VARCHAR, false, List.of("_to")),
+                new ArangoColumnHandle("weight", BIGINT, false, List.of("weight")));
 
         ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder());
         ConnectorPageSource source = provider.createPageSource(null, null, null, handle, columns, null);
@@ -173,8 +173,8 @@ class ArangoPageSourceProviderTest {
     void createPageSourceRejectsArrayColumnLoudly() {
         ArangoTableHandle handle = new ArangoTableHandle("shop", "items", false, TupleDomain.all(), OptionalLong.empty());
         List<ColumnHandle> columns = List.of(
-                new ArangoColumnHandle("name", VARCHAR, false, "name"),
-                new ArangoColumnHandle("tags", new ArrayType(VARCHAR), false, "tags"));
+                new ArangoColumnHandle("name", VARCHAR, false, List.of("name")),
+                new ArangoColumnHandle("tags", new ArrayType(VARCHAR), false, List.of("tags")));
 
         ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder());
 
@@ -187,7 +187,7 @@ class ArangoPageSourceProviderTest {
     void createPageSourceRejectsRowColumnLoudly() {
         ArangoTableHandle handle = new ArangoTableHandle("shop", "items", false, TupleDomain.all(), OptionalLong.empty());
         List<ColumnHandle> columns = List.of(
-                new ArangoColumnHandle("address", RowType.rowType(RowType.field("city", VARCHAR)), false, "address"));
+                new ArangoColumnHandle("address", RowType.rowType(RowType.field("city", VARCHAR)), false, List.of("address")));
 
         ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder());
 
@@ -200,7 +200,7 @@ class ArangoPageSourceProviderTest {
     void createPageSourceRejectsDecimalColumnLoudly() {
         ArangoTableHandle handle = new ArangoTableHandle("shop", "items", false, TupleDomain.all(), OptionalLong.empty());
         List<ColumnHandle> columns = List.of(
-                new ArangoColumnHandle("bigNumber", DecimalType.createDecimalType(38, 0), false, "bigNumber"));
+                new ArangoColumnHandle("bigNumber", DecimalType.createDecimalType(38, 0), false, List.of("bigNumber")));
 
         ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder());
 
@@ -218,7 +218,7 @@ class ArangoPageSourceProviderTest {
     @Test
     void createPageSourceAllowsQueryThatDoesNotProjectUnsupportedColumn() throws Exception {
         ArangoTableHandle handle = new ArangoTableHandle("shop", "items", false, TupleDomain.all(), OptionalLong.empty());
-        List<ColumnHandle> columns = List.of(new ArangoColumnHandle("name", VARCHAR, false, "name"));
+        List<ColumnHandle> columns = List.of(new ArangoColumnHandle("name", VARCHAR, false, List.of("name")));
 
         ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder());
         ConnectorPageSource source = provider.createPageSource(null, null, null, handle, columns, null);

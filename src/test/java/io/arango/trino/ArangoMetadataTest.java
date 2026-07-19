@@ -9,6 +9,7 @@ import io.arango.trino.handle.ArangoTableHandle;
 import io.arango.trino.schema.SchemaResolver;
 import io.arango.trino.schema.SchemaResolver.ArangoColumn;
 import io.trino.spi.TrinoException;
+import io.trino.spi.connector.Assignment;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTableMetadata;
@@ -17,9 +18,14 @@ import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
 import io.trino.spi.connector.LimitApplicationResult;
 import io.trino.spi.connector.PointerType;
+import io.trino.spi.connector.ProjectionApplicationResult;
 import io.trino.spi.connector.SchemaTableName;
+import io.trino.spi.expression.ConnectorExpression;
+import io.trino.spi.expression.FieldDereference;
+import io.trino.spi.expression.Variable;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.type.RowType;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
@@ -32,6 +38,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -267,7 +274,7 @@ class ArangoMetadataTest {
     void applyFilterPushesEqualityAndDropsFromResidual() {
         ArangoMetadata metadata = new ArangoMetadata(null, null);
         ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
-        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, "age");
+        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, List.of("age"));
         Constraint constraint = new Constraint(TupleDomain.withColumnDomains(
                 Map.of(age, Domain.singleValue(BIGINT, 30L))));
 
@@ -283,7 +290,7 @@ class ArangoMetadataTest {
     void applyFilterKeepsNullableRestrictedDomainInResidual() {
         ArangoMetadata metadata = new ArangoMetadata(null, null);
         ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
-        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, "age");
+        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, List.of("age"));
         Domain nullableRestricted = Domain.create(io.trino.spi.predicate.ValueSet.of(BIGINT, 30L), true);
         Constraint constraint = new Constraint(TupleDomain.withColumnDomains(Map.of(age, nullableRestricted)));
 
@@ -300,7 +307,7 @@ class ArangoMetadataTest {
         // than in Trino, so IS NULL must stay residual rather than being pushed.
         ArangoMetadata metadata = new ArangoMetadata(null, null);
         ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
-        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, "age");
+        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, List.of("age"));
         Constraint constraint = new Constraint(TupleDomain.withColumnDomains(
                 Map.of(age, Domain.onlyNull(BIGINT))));
 
@@ -313,7 +320,7 @@ class ArangoMetadataTest {
     void applyFilterKeepsIsNotNullInResidual() {
         ArangoMetadata metadata = new ArangoMetadata(null, null);
         ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
-        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, "age");
+        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, List.of("age"));
         Constraint constraint = new Constraint(TupleDomain.withColumnDomains(
                 Map.of(age, Domain.notNull(BIGINT))));
 
@@ -325,7 +332,7 @@ class ArangoMetadataTest {
     @Test
     void applyFilterReturnsEmptyWhenNothingNewToPush() {
         ArangoMetadata metadata = new ArangoMetadata(null, null);
-        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, "age");
+        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, List.of("age"));
         TupleDomain<ColumnHandle> alreadyPushed = TupleDomain.withColumnDomains(
                 Map.of(age, Domain.singleValue(BIGINT, 30L)));
         ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, alreadyPushed, OptionalLong.empty());
@@ -378,6 +385,66 @@ class ArangoMetadataTest {
         ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.of(10L));
 
         Optional<LimitApplicationResult<ConnectorTableHandle>> result = metadata.applyLimit(null, handle, 10L);
+
+        assertThat(result).isEmpty();
+    }
+
+    @Test
+    void applyProjectionPushesNestedFieldDereference() {
+        ArangoMetadata metadata = new ArangoMetadata(null, null);
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
+        RowType addressType = RowType.rowType(
+                RowType.field("city", VARCHAR),
+                RowType.field("zip", VARCHAR));
+        ArangoColumnHandle addressColumn = new ArangoColumnHandle("address", addressType, false, List.of("address"));
+
+        Variable addressVar = new Variable("address_0", addressType);
+        FieldDereference cityDeref = new FieldDereference(VARCHAR, addressVar, 0);
+        Map<String, ColumnHandle> assignments = Map.of("address_0", addressColumn);
+
+        Optional<ProjectionApplicationResult<ConnectorTableHandle>> result =
+                metadata.applyProjection(null, handle, List.of(cityDeref), assignments);
+
+        assertThat(result).isPresent();
+        List<Assignment> newAssignments = result.get().getAssignments();
+        assertThat(newAssignments).hasSize(1);
+        ArangoColumnHandle pushedColumn = (ArangoColumnHandle) newAssignments.get(0).getColumn();
+        assertThat(pushedColumn.path()).isEqualTo(List.of("address", "city"));
+        assertThat(pushedColumn.name()).isEqualTo("address$city");
+        assertThat(pushedColumn.type()).isEqualTo(VARCHAR);
+        assertThat(result.get().getProjections()).containsExactly(new Variable("address$city", VARCHAR));
+    }
+
+    @Test
+    void applyProjectionDeclinesDereferenceIntoNonRowType() {
+        ArangoMetadata metadata = new ArangoMetadata(null, null);
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
+        ArangoColumnHandle ageColumn = new ArangoColumnHandle("age", BIGINT, false, List.of("age"));
+        // FieldDereference's constructor requires its target's declared type to already be a
+        // RowType (it unconditionally casts target.getType() to RowType), so ageVar can't be
+        // declared BIGINT here even though the column it resolves to (ageColumn) is BIGINT. The
+        // dummy RowType only satisfies that constructor precondition; resolveDereference's
+        // decline path under test is driven by ageColumn.type() (BIGINT), not by ageVar's type.
+        Variable ageVar = new Variable("age_0", RowType.rowType(RowType.field("x", DOUBLE)));
+        FieldDereference bogusDeref = new FieldDereference(DOUBLE, ageVar, 0);
+        Map<String, ColumnHandle> assignments = Map.of("age_0", ageColumn);
+
+        Optional<ProjectionApplicationResult<ConnectorTableHandle>> result =
+                metadata.applyProjection(null, handle, List.of(bogusDeref), assignments);
+
+        assertThat(result).isEmpty();
+    }
+
+    @Test
+    void applyProjectionDeclinesPureVariablePassthrough() {
+        ArangoMetadata metadata = new ArangoMetadata(null, null);
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
+        ArangoColumnHandle nameColumn = new ArangoColumnHandle("name", VARCHAR, false, List.of("name"));
+        Variable nameVar = new Variable("name_0", VARCHAR);
+        Map<String, ColumnHandle> assignments = Map.of("name_0", nameColumn);
+
+        Optional<ProjectionApplicationResult<ConnectorTableHandle>> result =
+                metadata.applyProjection(null, handle, List.of(nameVar), assignments);
 
         assertThat(result).isEmpty();
     }

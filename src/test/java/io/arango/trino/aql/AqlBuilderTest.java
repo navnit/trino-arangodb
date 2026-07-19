@@ -28,7 +28,7 @@ class AqlBuilderTest {
     void buildsProjectedScanWithBoundCollection() {
         AqlQuery q = new AqlBuilder().buildScan(
                 unconstrainedHandle(),
-                List.of(new ArangoColumnHandle("name", VARCHAR, false, "name")));
+                List.of(new ArangoColumnHandle("name", VARCHAR, false, List.of("name"))));
         assertThat(q.aql()).isEqualTo("FOR d IN @@col RETURN {\"name\": d[\"name\"]}");
         assertThat(q.bindVars()).containsEntry("@col", "users");
     }
@@ -41,7 +41,7 @@ class AqlBuilderTest {
 
     @Test
     void treatsLiteralDotInColumnNameAsOneAttributeNotANestedPath() {
-        ArangoColumnHandle dotted = new ArangoColumnHandle("a.b", VARCHAR, false, "a.b");
+        ArangoColumnHandle dotted = new ArangoColumnHandle("a.b", VARCHAR, false, List.of("a.b"));
         AqlQuery q = new AqlBuilder().buildScan(unconstrainedHandle(), List.of(dotted));
         assertThat(q.aql()).isEqualTo("FOR d IN @@col RETURN {\"a.b\": d[\"a.b\"]}");
     }
@@ -53,7 +53,7 @@ class AqlBuilderTest {
 
     @Test
     void rendersEqualityFilter() {
-        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, "age");
+        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, List.of("age"));
         AqlQuery q = new AqlBuilder().buildScan(
                 handleWithConstraint(ImmutableMap.of(age, Domain.singleValue(BIGINT, 30L))),
                 List.of(age));
@@ -63,7 +63,7 @@ class AqlBuilderTest {
 
     @Test
     void rendersInFilter() {
-        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, "age");
+        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, List.of("age"));
         AqlQuery q = new AqlBuilder().buildScan(
                 handleWithConstraint(ImmutableMap.of(age, Domain.multipleValues(BIGINT, List.of(30L, 40L)))),
                 List.of(age));
@@ -73,7 +73,7 @@ class AqlBuilderTest {
 
     @Test
     void rendersGuardedRangeFilter() {
-        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, "age");
+        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, List.of("age"));
         Domain range = Domain.create(
                 io.trino.spi.predicate.ValueSet.ofRanges(io.trino.spi.predicate.Range.greaterThan(BIGINT, 30L)),
                 false);
@@ -87,7 +87,7 @@ class AqlBuilderTest {
 
     @Test
     void rendersTwoSidedRangeFilterWithoutRedundantParens() {
-        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, "age");
+        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, List.of("age"));
         Domain range = Domain.create(
                 io.trino.spi.predicate.ValueSet.ofRanges(io.trino.spi.predicate.Range.range(BIGINT, 20L, true, 30L, false)),
                 false);
@@ -104,7 +104,7 @@ class AqlBuilderTest {
 
     @Test
     void rendersVarcharEqualityByConvertingSliceToString() {
-        ArangoColumnHandle name = new ArangoColumnHandle("name", VARCHAR, false, "name");
+        ArangoColumnHandle name = new ArangoColumnHandle("name", VARCHAR, false, List.of("name"));
         AqlQuery q = new AqlBuilder().buildScan(
                 handleWithConstraint(ImmutableMap.of(name, Domain.singleValue(VARCHAR, utf8Slice("ada")))),
                 List.of(name));
@@ -113,8 +113,8 @@ class AqlBuilderTest {
 
     @Test
     void combinesTwoColumnFiltersWithAnd() {
-        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, "age");
-        ArangoColumnHandle active = new ArangoColumnHandle("active", BOOLEAN, false, "active");
+        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, List.of("age"));
+        ArangoColumnHandle active = new ArangoColumnHandle("active", BOOLEAN, false, List.of("active"));
         AqlQuery q = new AqlBuilder().buildScan(
                 handleWithConstraint(ImmutableMap.of(
                         age, Domain.singleValue(BIGINT, 30L),
@@ -126,7 +126,7 @@ class AqlBuilderTest {
 
     @Test
     void rendersLimitAsLiteralAfterFilter() {
-        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, "age");
+        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, List.of("age"));
         ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false,
                 TupleDomain.withColumnDomains(ImmutableMap.of(age, Domain.singleValue(BIGINT, 30L))),
                 OptionalLong.of(5L));
@@ -141,5 +141,13 @@ class AqlBuilderTest {
                 new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.of(10L)),
                 List.of());
         assertThat(q.aql()).isEqualTo("FOR d IN @@col LIMIT 10 RETURN {}");
+    }
+
+    @Test
+    void rendersMultiSegmentPathAsChainedBracketAccess() {
+        ArangoColumnHandle city = new ArangoColumnHandle("address$city", VARCHAR, false, List.of("address", "city"));
+        AqlQuery q = new AqlBuilder().buildScan(unconstrainedHandle(), List.of(city));
+
+        assertThat(q.aql()).isEqualTo("FOR d IN @@col RETURN {\"address$city\": d[\"address\"][\"city\"]}");
     }
 }

@@ -113,8 +113,12 @@ public class AqlBuilder {
         return sb.append("}").toString();
     }
 
-    private static String documentAccessor(String path) {
-        return "d[" + quoteAqlString(path) + "]";
+    private static String documentAccessor(List<String> path) {
+        StringBuilder sb = new StringBuilder("d");
+        for (String segment : path) {
+            sb.append('[').append(quoteAqlString(segment)).append(']');
+        }
+        return sb.toString();
     }
 
     private static String quoteAqlString(String value) {
