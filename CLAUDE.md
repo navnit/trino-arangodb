@@ -23,7 +23,7 @@ mvn test -Dtest=TypeMapperTest       # run a single test class
 mvn test -Dtest=TypeMapperTest#mergeIntAndFloatWidensToDouble   # single test method
 ```
 
-Most test classes (`ArangoClientTest`, `ArangoConnectorQueryTest`, `ArangoPageSourceProviderTest`, and others using `TestingArangoServer`) spin up a real ArangoDB container via Testcontainers — **Docker must be running locally** for `mvn test` to pass. There are no mocks of ArangoDB anywhere in the test suite; everything runs against a live container, including full end-to-end SQL queries via Trino's `DistributedQueryRunner` (see `ArangoConnectorQueryTest`).
+Most test classes (`ArangoClientTest`, `ArangoConnectorQueryTest`, `ArangoPageSourceProviderTest`, and others using `TestingArangoServer`) spin up a real ArangoDB container via Testcontainers — **Docker must be running locally** for `mvn test` to pass. No mocking framework is used anywhere in the test suite; where a test does need to avoid hitting a live server (e.g. `ArangoMetadataTest`'s error-path cases), it uses hand-written `ArangoClient` subclasses as test doubles rather than a container. End-to-end SQL queries run against a live container via Trino's `DistributedQueryRunner` (see `ArangoConnectorQueryTest`).
 
 There is no linter/formatter plugin configured in `pom.xml`.
 
@@ -35,7 +35,7 @@ This means several dependency versions that a real Trino connector would normall
 
 ### SPI wiring (Plugin → Connector)
 
-Trino discovers the connector via `ArangoPlugin.getConnectorFactories()` → `ArangoConnectorFactory` (registered under the name `"arangodb"`). `ArangoConnectorFactory.create()` boots an Airlift `Bootstrap`/Guice `Injector` from `ArangoModule`, then pulls a singleton `ArangoConnector` out of it. `ArangoModule` binds every component (`ArangoConfig`, `ArangoClient`, `TypeMapper`, `SchemaResolver`, `AqlBuilder`, `ArangoMetadata`, `ArangoSplitManager`, `ArangoPageSourceProvider`, `ArangoConnector`) as `Scopes.SINGLETON`. `ArangoConnector` just hands out these singletons for `getMetadata()`/`getSplitManager()`/`getPageSourceProvider()`, and its `shutdown()` calls `LifeCycleManager.stop()`, which triggers `ArangoClient`'s `@PreDestroy` (`close()` on the underlying `ArangoDB` driver instance).
+Trino discovers the connector via `ArangoPlugin.getConnectorFactories()` → `ArangoConnectorFactory` (registered under the name `"arangodb"`). `ArangoConnectorFactory.create()` boots an Airlift `Bootstrap`/Guice `Injector` from `ArangoModule`, then pulls a singleton `ArangoConnector` out of it. `ArangoModule` binds `ArangoClient`, `TypeMapper`, `SchemaResolver`, `AqlBuilder`, `ArangoMetadata`, `ArangoSplitManager`, `ArangoPageSourceProvider`, and `ArangoConnector` as `Scopes.SINGLETON`; `ArangoConfig` is bound separately via Airlift's `configBinder(...).bindConfig(...)`. `ArangoConnector` just hands out these singletons for `getMetadata()`/`getSplitManager()`/`getPageSourceProvider()`, and its `shutdown()` calls `LifeCycleManager.stop()`, which triggers `ArangoClient`'s `@PreDestroy` (`close()` on the underlying `ArangoDB` driver instance).
 
 `ArangoConfig` (bound via Airlift's `@Config`) holds every user-facing setting: `arangodb.hosts` (comma-separated `host:port` list), `arangodb.user`, `arangodb.password` (`@ConfigSecuritySensitive`), `arangodb.schema.sample-size` (default 1000), `arangodb.schema.sample-random`, `arangodb.schema.mixed-type-strategy` (`VARCHAR` or `JSON`, though `JSON` is not actually wired up yet — see `TypeMapper.merge`).
 
