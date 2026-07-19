@@ -34,6 +34,8 @@ public class AqlBuilder {
             aql.append(" FILTER ").append(String.join(" AND ", filters));
         }
 
+        table.limit().ifPresent(limit -> aql.append(" LIMIT ").append(limit));
+
         aql.append(" RETURN ").append(buildReturnClause(columns));
         return new AqlQuery(aql.toString(), bindVars);
     }

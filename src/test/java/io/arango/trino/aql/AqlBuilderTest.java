@@ -123,4 +123,23 @@ class AqlBuilderTest {
         assertThat(q.aql()).isEqualTo(
                 "FOR d IN @@col FILTER (d[\"age\"] == @v0) AND (d[\"active\"] == @v1) RETURN {\"age\": d[\"age\"], \"active\": d[\"active\"]}");
     }
+
+    @Test
+    void rendersLimitAsLiteralAfterFilter() {
+        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, "age");
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false,
+                TupleDomain.withColumnDomains(ImmutableMap.of(age, Domain.singleValue(BIGINT, 30L))),
+                OptionalLong.of(5L));
+        AqlQuery q = new AqlBuilder().buildScan(handle, List.of(age));
+        assertThat(q.aql()).isEqualTo(
+                "FOR d IN @@col FILTER (d[\"age\"] == @v0) LIMIT 5 RETURN {\"age\": d[\"age\"]}");
+    }
+
+    @Test
+    void rendersLimitWithNoFilter() {
+        AqlQuery q = new AqlBuilder().buildScan(
+                new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.of(10L)),
+                List.of());
+        assertThat(q.aql()).isEqualTo("FOR d IN @@col LIMIT 10 RETURN {}");
+    }
 }

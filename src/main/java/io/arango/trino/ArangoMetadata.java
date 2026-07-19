@@ -194,6 +194,18 @@ public class ArangoMetadata implements ConnectorMetadata {
         return type.equals(BigintType.BIGINT) || type.equals(DoubleType.DOUBLE);
     }
 
+    @Override
+    public Optional<LimitApplicationResult<ConnectorTableHandle>> applyLimit(
+            ConnectorSession session, ConnectorTableHandle table, long limit) {
+        ArangoTableHandle handle = (ArangoTableHandle) table;
+        if (handle.limit().isPresent() && handle.limit().getAsLong() <= limit) {
+            return Optional.empty();
+        }
+        // M2 is single-split always (ArangoSplitManager emits exactly one ArangoSplit per
+        // table), so a pushed AQL LIMIT is always exactly satisfied: limitGuaranteed=true.
+        return Optional.of(new LimitApplicationResult<>(handle.withLimit(limit), true, false));
+    }
+
     private List<ArangoColumn> resolve(ArangoTableHandle handle) {
         return columnCache.computeIfAbsent(handle.schemaTableName(), key ->
                 schemaResolver.resolveColumns(handle.schema(),

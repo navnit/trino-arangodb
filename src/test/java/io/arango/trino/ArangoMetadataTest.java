@@ -15,6 +15,7 @@ import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.ConnectorTableVersion;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
+import io.trino.spi.connector.LimitApplicationResult;
 import io.trino.spi.connector.PointerType;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.predicate.Domain;
@@ -331,6 +332,29 @@ class ArangoMetadataTest {
         Constraint sameConstraint = new Constraint(alreadyPushed);
 
         Optional<ConstraintApplicationResult<ConnectorTableHandle>> result = metadata.applyFilter(null, handle, sameConstraint);
+
+        assertThat(result).isEmpty();
+    }
+
+    @Test
+    void applyLimitPushesAndGuaranteesLimit() {
+        ArangoMetadata metadata = new ArangoMetadata(null, null);
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
+
+        Optional<LimitApplicationResult<ConnectorTableHandle>> result = metadata.applyLimit(null, handle, 10L);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().isLimitGuaranteed()).isTrue();
+        ArangoTableHandle newHandle = (ArangoTableHandle) result.get().getHandle();
+        assertThat(newHandle.limit()).isEqualTo(OptionalLong.of(10L));
+    }
+
+    @Test
+    void applyLimitDeclinesWhenExistingLimitIsAlreadySmaller() {
+        ArangoMetadata metadata = new ArangoMetadata(null, null);
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.of(5L));
+
+        Optional<LimitApplicationResult<ConnectorTableHandle>> result = metadata.applyLimit(null, handle, 10L);
 
         assertThat(result).isEmpty();
     }
