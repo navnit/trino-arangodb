@@ -75,7 +75,7 @@ public class ArangoMetadata implements ConnectorMetadata {
     public ConnectorTableMetadata getTableMetadata(ConnectorSession session, ConnectorTableHandle table) {
         ArangoTableHandle handle = (ArangoTableHandle) table;
         List<ColumnMetadata> columns = resolve(handle).stream()
-                .map(c -> new ArangoColumnHandle(c.name(), c.type(), c.hidden()).toColumnMetadata())
+                .map(c -> new ArangoColumnHandle(c.name(), c.type(), c.hidden(), c.name()).toColumnMetadata())
                 .collect(ImmutableList.toImmutableList());
         return new ConnectorTableMetadata(handle.schemaTableName(), columns);
     }
@@ -85,7 +85,7 @@ public class ArangoMetadata implements ConnectorMetadata {
         ArangoTableHandle handle = (ArangoTableHandle) table;
         ImmutableMap.Builder<String, ColumnHandle> out = ImmutableMap.builder();
         for (ArangoColumn c : resolve(handle)) {
-            out.put(c.name(), new ArangoColumnHandle(c.name(), c.type(), c.hidden()));
+            out.put(c.name(), new ArangoColumnHandle(c.name(), c.type(), c.hidden(), c.name()));
         }
         return out.buildOrThrow();
     }
