@@ -49,6 +49,16 @@ class SchemaResolverTest {
                 "name", "bob",
                 "address", newMap("city", "LA", "zip", null),
                 "tags", java.util.Arrays.asList((Object) null)));
+
+        // edge collection: _from/_to must be visible VARCHAR columns
+        client.createEdgeCollectionForTest("shop", "orders");
+        Map<String, Object> edgeDoc = newMap("name", "ada");
+        edgeDoc.put("_from", "users/1");
+        edgeDoc.put("_to", "users/2");
+        client.insertForTest("shop", "orders", edgeDoc);
+
+        // empty collection: sample yields zero docs
+        client.createDocumentCollectionForTest("shop", "empty_col");
     }
 
     private static Map<String, Object> newMap(Object... kv) {
@@ -109,6 +119,31 @@ class SchemaResolverTest {
         // "tags" was [null] in every sampled document: the element type must resolve
         // to VARCHAR, not be left as UNKNOWN.
         assertThat(arrayType.getElementType()).isEqualTo(VARCHAR);
+    }
+
+    @Test
+    void edgeCollectionExposesFromAndToAsVisibleVarchar() {
+        List<ArangoColumn> cols = resolver.resolveColumns("shop",
+                new CollectionInfo("orders", true, false));
+        assertThat(cols).anySatisfy(c -> {
+            assertThat(c.name()).isEqualTo("_from");
+            assertThat(c.hidden()).isFalse();
+            assertThat(c.type()).isEqualTo(VARCHAR);
+        });
+        assertThat(cols).anySatisfy(c -> {
+            assertThat(c.name()).isEqualTo("_to");
+            assertThat(c.hidden()).isFalse();
+            assertThat(c.type()).isEqualTo(VARCHAR);
+        });
+    }
+
+    @Test
+    void emptySampleYieldsOnlyHiddenSystemColumns() {
+        List<ArangoColumn> cols = resolver.resolveColumns("shop",
+                new CollectionInfo("empty_col", false, false));
+        assertThat(cols).extracting(ArangoColumn::name)
+                .containsExactlyInAnyOrder("_key", "_id", "_rev");
+        assertThat(cols).allSatisfy(c -> assertThat(c.hidden()).isTrue());
     }
 
     private static io.trino.spi.type.Type colType(List<ArangoColumn> cols, String name) {
