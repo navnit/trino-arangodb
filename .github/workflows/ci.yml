@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# Cancel superseded runs on the same ref (e.g. a new push to an open PR).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # maven.compiler.release=24 in pom.xml requires a JDK >= 24.
+      - name: Set up JDK 24
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '24'
+          cache: maven
+
+      # 'package' runs the full test phase first: the suite is almost entirely
+      # Testcontainers-based (a real arangodb/arangodb:3.12 container per test class,
+      # plus DistributedQueryRunner end-to-end tests), which needs Docker. GitHub's
+      # ubuntu-latest runners ship Docker, so no extra service setup is required.
+      #
+      # pom.xml pins the Testcontainers-shaded docker-java client's Remote API version
+      # (surefire api.version property) to work around its lack of negotiation. Its
+      # default (1.51) suits a modern local Docker Engine but is rejected as "too new"
+      # by an older Engine, so here we hand Maven the runner daemon's own reported max
+      # via -Ddocker.api.version. The value is echoed first, unconditionally, so the
+      # log shows exactly which API version this runner offered.
+      - name: Build and test
+        run: |
+          DOCKER_API=$(docker version --format '{{.Server.APIVersion}}')
+          echo "Runner Docker Server API version: ${DOCKER_API}"
+          mvn -B --no-transfer-progress -Ddocker.api.version="${DOCKER_API}" package
+
+      - name: Upload plugin artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trino-arangodb-plugin
+          path: target/*.zip
+          if-no-files-found: warn
