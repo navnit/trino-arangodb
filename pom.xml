@@ -176,6 +176,19 @@
                         --add-opens=java.base/java.lang=ALL-UNNAMED
                         --add-opens=java.base/java.util=ALL-UNNAMED
                         --add-opens=java.base/sun.nio.ch=ALL-UNNAMED</argLine>
+                    <!-- Forced test-mechanics addition (Task 2): the docker-java client shaded
+                         inside testcontainers 1.20.4 defaults to Docker Remote API 1.32
+                         (org.testcontainers.shaded...DefaultDockerClientConfig$Builder), which any
+                         current Docker Engine (tested: Engine 29.4.3, reporting Api-Version 1.54)
+                         rejects with HTTP 400 on /info. The only override point is the JVM system
+                         property api.version (no env var equivalent). This is a repo-wide fix, not
+                         a machine-specific one: any reviewer/CI running a modern Docker Engine
+                         against pinned testcontainers 1.20.4 hits the same 400. See
+                         task-2-report.md for verification that this alone (no env vars) makes the
+                         Testcontainers-backed ArangoClientTest pass. -->
+                    <systemPropertyVariables>
+                        <api.version>1.51</api.version>
+                    </systemPropertyVariables>
                 </configuration>
             </plugin>
         </plugins>
