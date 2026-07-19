@@ -1,0 +1,238 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>io.arango</groupId>
+    <artifactId>trino-arangodb</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+    <packaging>trino-plugin</packaging>
+
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <maven.compiler.release>24</maven.compiler.release>
+        <dep.trino.version>476</dep.trino.version>
+        <dep.airlift.version>293</dep.airlift.version>
+        <dep.arango.version>7.13.0</dep.arango.version>
+        <dep.testcontainers.version>1.20.4</dep.testcontainers.version>
+        <dep.junit.version>5.11.3</dep.junit.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>io.trino</groupId>
+            <artifactId>trino-spi</artifactId>
+            <version>${dep.trino.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <!-- Not in brief's Step 3 verbatim listing: added to satisfy trino-maven-plugin's
+             check-spi-dependencies goal. These artifacts are non-optional entries in
+             trino-spi's own compile/runtime dependency graph (and therefore must be
+             'provided', supplied by Trino's plugin classloader at runtime), but other
+             declared dependencies here (arangodb-java-driver's jackson-databind, guice's
+             opentelemetry instrumentation) also pull them in, mediating their effective
+             scope to 'compile'. A real Trino connector module normally inherits this scope
+             pinning from the io.trino:trino-root parent pom's dependencyManagement; this
+             standalone pom (per the brief, no parent) has no such pinning, so each artifact
+             is pinned explicitly here instead. Verified via mvn dependency:tree
+             cross-referenced against trino-spi:476's own pom, including its <optional> flags:
+             jackson-annotations, opentelemetry-api and opentelemetry-context are non-optional
+             in trino-spi so they are pinned to 'provided' here; slice, opentelemetry-api-
+             incubator and jol-core are also non-optional in trino-spi but already mediate to
+             'provided' naturally, so no override was needed. error_prone_annotations and
+             jakarta.annotation-api ARE marked <optional>true</optional> in trino-spi's pom
+             (not part of its guaranteed runtime SPI surface); the plugin goal rejects
+             'provided' for those two, so they are intentionally left undeclared here and
+             resolve at their natural 'compile' scope. See task-1-report.md Redo section. -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-annotations</artifactId>
+            <version>2.19.0</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-api</artifactId>
+            <version>1.50.0</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-context</artifactId>
+            <version>1.50.0</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.airlift</groupId>
+            <artifactId>bootstrap</artifactId>
+            <version>${dep.airlift.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.airlift</groupId>
+            <artifactId>configuration</artifactId>
+            <version>${dep.airlift.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.google.inject</groupId>
+            <artifactId>guice</artifactId>
+            <version>7.0.0</version>
+        </dependency>
+        <dependency>
+            <groupId>com.google.guava</groupId>
+            <artifactId>guava</artifactId>
+            <version>33.3.1-jre</version>
+        </dependency>
+        <dependency>
+            <groupId>com.arangodb</groupId>
+            <artifactId>arangodb-java-driver</artifactId>
+            <version>${dep.arango.version}</version>
+        </dependency>
+
+        <!-- test -->
+        <dependency>
+            <groupId>io.trino</groupId>
+            <artifactId>trino-testing</artifactId>
+            <version>${dep.trino.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- Not in brief's Step 3 verbatim listing: forced additions, discovered running T9's
+             DistributedQueryRunner-based test (the first task to exercise trino-testing's
+             TestingDiscoveryServer). trino-testing:476 needs io.airlift.discovery:discovery-server,
+             which trino-root:476's dependencyManagement pins to 1.37 (an intentionally separate,
+             much older release line for that one artifact), but discovery-server:1.37's own POM
+             pulls jaxrs/http-client/jmx/trace-token at ITS OWN old transitive version (247), while
+             trino-testing's other direct io.airlift dependencies (http-server, node, json, stats,
+             testing, tracing, concurrent, security) resolve at 336. In the real Trino build this
+             skew is closed by trino-root importing io.airlift:bom:336, which forces the whole
+             io.airlift group to 336 project-wide; this standalone pom (per the brief, no parent)
+             has no such import. Without it, jaxrs:247's JaxrsModule references
+             io.airlift.http.server.TheServlet, a binding annotation that only exists in
+             http-server:247 (verified by inspecting both jars); mediation picks http-server:336 for
+             the rest of the graph, so TheServlet is absent at runtime and DistributedQueryRunner's
+             TestingDiscoveryServer fails with NoClassDefFoundError. Rather than importing the whole
+             io.airlift:bom (which would also re-pin transitive deps of our own bootstrap:293/
+             configuration:293, e.g. log/log-manager/secrets-spi, away from the versions those two
+             modules were actually built and tested against in T1-T8), only jaxrs/http-client/jmx are
+             pinned to 336 as direct depth-1 test dependencies so mediation prefers them over
+             discovery-server's depth-3 request for 247 (trace-token has no 336 release: verified
+             it is absent from both Maven Central and io.airlift:bom:336, and http-client:336's own
+             POM confirms it no longer depends on trace-token at all, so nothing needs to pull it in
+             once http-client is upgraded). Verified via mvn dependency:tree: no other io.airlift
+             artifact resolves at 247. -->
+        <dependency>
+            <groupId>io.airlift</groupId>
+            <artifactId>jaxrs</artifactId>
+            <version>336</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.airlift</groupId>
+            <artifactId>http-client</artifactId>
+            <version>336</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.airlift</groupId>
+            <artifactId>jmx</artifactId>
+            <version>336</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.airlift</groupId>
+            <artifactId>configuration</artifactId>
+            <version>${dep.airlift.version}</version>
+            <classifier>tests</classifier>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${dep.junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- Not in brief's Step 3 verbatim listing: forced additions. io.trino:trino-testing:476
+             transitively depends directly on org.junit.jupiter:junit-jupiter-api:5.13.0 (a
+             depth-2 dependency, same depth as junit-jupiter's own transitive request for
+             junit-jupiter-api:5.11.3), and Maven's nearest-wins mediation breaks that depth
+             tie by declaration order, so 5.13.0 was winning and being paired at runtime with
+             junit-jupiter-engine:5.11.3, a binary-incompatible API/engine skew that broke
+             test discovery (UnsupportedOperationException in DisplayNameGenerator). Pinning
+             junit-jupiter-api explicitly as a depth-1 dependency here forces it back to
+             ${dep.junit.version}, which always wins mediation over any depth-2 request
+             regardless of order. Separately, junit-platform-launcher was absent from the
+             resolved tree entirely; Surefire 3.5.2's JUnit-Platform provider needs it on the
+             test classpath, and without it the forked test JVM failed with
+             NoClassDefFoundError on org.junit.platform.engine.reporting.OutputDirectoryProvider.
+             Pinned to 1.11.3, the platform release paired with junit-jupiter 5.11.3. See
+             task-1-report.md Redo section. -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-api</artifactId>
+            <version>${dep.junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.platform</groupId>
+            <artifactId>junit-platform-launcher</artifactId>
+            <version>1.11.3</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <version>3.26.3</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers</artifactId>
+            <version>${dep.testcontainers.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${dep.testcontainers.version}</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>io.trino</groupId>
+                <artifactId>trino-maven-plugin</artifactId>
+                <!-- Use the exact plugin version from Trino 476's root pom (>=15); verify at pin. -->
+                <version>15</version>
+                <extensions>true</extensions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.2</version>
+                <configuration>
+                    <!-- DistributedQueryRunner needs Trino's test JVM flags. Copy the exact
+                         argLine from Trino 476's root pom and verify at pin. -->
+                    <argLine>-Xmx2g -XX:+EnableDynamicAgentLoading -Dfile.encoding=UTF-8
+                        --add-opens=java.base/java.nio=ALL-UNNAMED
+                        --add-opens=java.base/java.lang=ALL-UNNAMED
+                        --add-opens=java.base/java.util=ALL-UNNAMED
+                        --add-opens=java.base/sun.nio.ch=ALL-UNNAMED</argLine>
+                    <!-- Forced test-mechanics addition (Task 2): the docker-java client shaded
+                         inside testcontainers 1.20.4 defaults to Docker Remote API 1.32
+                         (org.testcontainers.shaded...DefaultDockerClientConfig$Builder), which any
+                         current Docker Engine (tested: Engine 29.4.3, reporting Api-Version 1.54)
+                         rejects with HTTP 400 on /info. The only override point is the JVM system
+                         property api.version (no env var equivalent). This is a repo-wide fix, not
+                         a machine-specific one: any reviewer/CI running a modern Docker Engine
+                         against pinned testcontainers 1.20.4 hits the same 400. See
+                         task-2-report.md for verification that this alone (no env vars) makes the
+                         Testcontainers-backed ArangoClientTest pass. -->
+                    <systemPropertyVariables>
+                        <api.version>1.51</api.version>
+                    </systemPropertyVariables>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

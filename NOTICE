@@ -1,0 +1,7 @@
+This project (arangodb-trino) is licensed under the Apache License, Version 2.0.
+
+It contains code derived from the Trino project (https://trino.io),
+Copyright the Trino Authors, licensed under the Apache License, Version 2.0:
+
+  - src/main/java/io/arango/trino/type/UnknownType.java
+    (derived from io.trino.spi.type.UnknownType)

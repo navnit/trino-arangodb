@@ -6,12 +6,12 @@
 
 **Architecture:** Standard Trino Connector SPI plugin (Java, Maven, Airlift/Guice). `ArangoClient` wraps `arangodb-java-driver` 7.x. `SchemaResolver` infers table schemas by merge-sampling documents; `TypeMapper` maps JSON/VelocyPack → Trino types with numeric widening. `ArangoMetadata` exposes schemas/tables/columns; `ArangoSplitManager` emits one split; `ArangoPageSource` runs the AQL cursor and builds columnar pages. No pushdown, no writes, no schema override/validation sources (those arrive in M2/M5).
 
-**Tech Stack:** Java 23, Maven, Trino SPI, `com.arangodb:arangodb-java-driver:7.x` (HTTP/2 + JSON serde), Airlift Bootstrap/Guice, JUnit 5 + AssertJ, Testcontainers.
+**Tech Stack:** Java 24, Maven, Trino SPI, `com.arangodb:arangodb-java-driver:7.x` (HTTP/2 + JSON serde), Airlift Bootstrap/Guice, JUnit 5 + AssertJ, Testcontainers.
 
 ## Global Constraints
 
 - **Connector name:** `arangodb` (registered by `ArangoConnectorFactory.getName()`).
-- **Java:** matches the Trino server JDK. Trino's Java-24 bump landed in the 475–478 window — **at pin time, confirm whether 476 requires JDK 23 or 24 and set the build JDK *and* `maven.compiler.release` to match.** A mismatch makes `trino-testing`/`DistributedQueryRunner` fail to load regardless of the compiler release, so every integration task (T2/T4/T9) depends on this being right.
+- **Java:** **resolved at pin time (2026-07-18): Trino 476 requires JDK 24** — its release notes (trino.io/docs/current/release/release-476.html) list "⚠️ Breaking change: Require JDK 24 to run Trino" (Trino's floor check is `>=`, so a newer installed JDK such as 25 satisfies it; this repo builds with whatever JDK 24+ is available in the environment, e.g. Temurin 25.0.3). Build JDK and `maven.compiler.release` are both set to `24`. This was previously an open verification gate (23-vs-24); it is now closed — every integration task (T2/T4/T9) depended on this being right, since a JDK below the floor makes `trino-testing`/`DistributedQueryRunner` fail to load regardless of the compiler release.
 - **Trino version:** pin one stable version (plan written against **Trino 476**). **SPI signatures below target 476 — verify each against the pinned version at task start and adjust.** Confirmed drift already folded in: the page-source emits via **`getNextSourcePage()`→`SourcePage`** (not `getNextPage()`→`Page`), per the ~468 SourcePage refactor (T8). Use `<dep.trino.version>` property in the pom.
 - **Driver:** `arangodb-java-driver` **7.x** over **HTTP/2 with the JSON serde** (`Protocol.HTTP2_JSON`) — the umbrella artifact bundles core + http-protocol + jackson-serde-json, so **no extra serde dependency** is needed. VelocyStream is not used (removed in 3.12). Binary VelocyPack serde is an optional later optimization requiring `com.arangodb:jackson-serde-vpack`.
 - **Package root:** `io.arango.trino`.
@@ -145,7 +145,7 @@ Expected: FAIL — `ArangoConfig` does not exist / does not compile.
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <maven.compiler.release>23</maven.compiler.release>
+        <maven.compiler.release>24</maven.compiler.release>
         <dep.trino.version>476</dep.trino.version>
         <dep.airlift.version>293</dep.airlift.version>
         <dep.arango.version>7.13.0</dep.arango.version>
@@ -1776,7 +1776,7 @@ git commit -m "feat: wire ArangoPlugin end-to-end; SELECT * over collections wor
 
 ## Review resolution (Fable, plan rev 2)
 
-**Blockers:** B1 `getNextSourcePage()`/`SourcePage.create` replaces `getNextPage()` (T8, confirmed 476); B2 `FixedSplitSource(List.of(...))` + `ArangoSplit.getRetainedSizeInBytes()` (T7); B3 JDK 23-vs-24 hard gate in Global Constraints (all integration tasks depend on it).
+**Blockers:** B1 `getNextSourcePage()`/`SourcePage.create` replaces `getNextPage()` (T8, confirmed 476); B2 `FixedSplitSource(List.of(...))` + `ArangoSplit.getRetainedSizeInBytes()` (T7); B3 JDK 23-vs-24 hard gate in Global Constraints — **resolved at execution time (2026-07-18): Trino 476 requires JDK 24 per official release notes; build JDK and `maven.compiler.release` set to 24.**
 **Should-fix:** S1 `trino-maven-plugin` 15 (T1); S2 dropped unused `io.airlift:json` (T1); S3 `LifeCycleManager.shutdown()` + `@PreDestroy` on `ArangoClient.close()` (T2/T9); S4 `HostAndPort.withDefaultPort` host parsing (T2); **S5 `UNKNOWN` bottom sentinel so null-then-typed fields don't degrade to VARCHAR, + regression test** (T3/T4); S6 edge-collection seed + `_from/_to` test (T2/T9); S7 surefire `argLine` for `DistributedQueryRunner` (T1); S8 `getTableHandle` throws `NOT_SUPPORTED` on versioned tables (T5); S9 memoized `resolve()` (T5).
 **Minor:** `List.of` system-attr order (T4); explicit empty-collection behavior (T4); `ArangoDBException`→table-not-found on missing schema (T5); "HTTP/2 + JSON serde" prose (Tech Stack/Driver); public-not-package-visible comment (T2).
 **Verified correct, no change:** 4-arg `getTableHandle`, 6-arg `createPageSource`, `getSplits`, all `Connector`/`Plugin`/`ConnectorFactory` methods, `PageBuilder`/`BlockBuilder` API, `getDisplayName()` strings, Jackson handle serialization, and the full driver-7.x surface (`query(aql, Class, bindVars)` arg order, `getCollections`, `BaseDocument` accessors, `shutdown()`).
