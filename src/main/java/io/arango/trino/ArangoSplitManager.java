@@ -14,6 +14,6 @@ public class ArangoSplitManager implements ConnectorSplitManager {
             DynamicFilter dynamicFilter,
             Constraint constraint) {
         // M1: exactly one split per table (single-server / no shard fan-out).
-        return new FixedSplitSource(List.of(new ArangoSplit()));
+        return new FixedSplitSource(List.of(new ArangoSplit(List.of())));
     }
 }
