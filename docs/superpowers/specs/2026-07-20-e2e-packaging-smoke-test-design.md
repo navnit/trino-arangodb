@@ -152,10 +152,13 @@ which is the entire reason for the test. The artifact-upload step is unchanged.
 The test itself is the deliverable. It is validated by: (a) it passes green
 against the current, correct pom; and (b) a deliberate negative check during
 development — after a normal `mvn -DskipTests package`, deleting the
-`arangodb-java-driver` jar from the exploded `target/trino-arangodb-<version>/`
+`core-7.13.0.jar` from the exploded `target/trino-arangodb-<version>/`
 bundle and running the IT via direct failsafe goals should make the smoke test
-fail at catalog startup (`ClassNotFoundException` on `com.arangodb`) while the
-in-JVM tests stay green (the driver is on their flat test classpath),
+fail at catalog startup (`NoClassDefFoundError` on `com.arangodb.ArangoDB`)
+while the in-JVM tests stay green (the driver is on their flat test classpath),
+(note: the arangodb-java-driver 7.x splits into modules — the aggregator
+`arangodb-java-driver-*.jar` is empty and the loaded classes live in
+`core-*.jar`, so `core` is the jar to remove),
 confirming the test actually exercises the isolation boundary. This deletes the
 already-built jar rather than re-scoping a dependency, because the
 `check-spi-dependencies` build-time validator (bound to `validate`, run even
