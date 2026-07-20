@@ -43,7 +43,7 @@
 
 - [ ] **Step 1: Add the trino-jdbc test dependency**
 
-In `pom.xml`, immediately after the `trino-testing` dependency block (the one ending `</dependency>` right before the `io.airlift:jaxrs` test dep, around line 108), add:
+In `pom.xml`, immediately after the `trino-testing` dependency block (its closing `</dependency>` is at line 108). A long airlift-336 explanatory comment follows on lines 109–132, then the `io.airlift:jaxrs` dep — insert *between* the trino-testing block and that comment (i.e. right after line 108), so the comment stays attached to the deps it documents. Add:
 
 ```xml
         <!-- JDBC client for the end-to-end packaging smoke test (PackagingSmokeIT):
@@ -96,7 +96,7 @@ Expected: `BUILD SUCCESS`. (`-DskipTests` skips both surefire and failsafe; this
 
 - [ ] **Step 4: Verify trino-jdbc resolves at test scope**
 
-Run: `mvn -q -B dependency:tree -Dincludes=io.trino:trino-jdbc`
+Run: `source ~/.sdkman/bin/sdkman-init.sh && mvn -q -B dependency:tree -Dincludes=io.trino:trino-jdbc`
 Expected: output contains `io.trino:trino-jdbc:jar:476:test`.
 
 - [ ] **Step 5: Commit**
@@ -340,23 +340,25 @@ class PackagingSmokeIT {
 }
 ```
 
+> Flake lever (not needed now — apply only if CI proves flaky): the official Trino image self-sizes its heap to a large fraction of host RAM, so on a small runner it can get OOM-killed and surface only as the 3-minute startup wait timing out. If that happens, cap the Trino container's memory by adding `.withCreateContainerCmdModifier(cmd -> cmd.getHostConfig().withMemory(3L * 1024 * 1024 * 1024))` (3 GB) to the `GenericContainer` chain.
+
 - [ ] **Step 2: Run the full verify (surefire suite + the new IT), green**
 
 Run: `source ~/.sdkman/bin/sdkman-init.sh && mvn -B --no-transfer-progress verify`
 Expected: `BUILD SUCCESS`. The `maven-failsafe-plugin:integration-test` line reports `Tests run: 2, Failures: 0, Errors: 0, Skipped: 0` for `PackagingSmokeIT`, and the surefire suite stays green.
 
-> Faster dev iteration (build once, then run only the IT): `mvn -B -DskipTests package` then `mvn -B failsafe:integration-test failsafe:verify -Dit.test=PackagingSmokeIT`. If Docker rejects the API version locally, append `-Ddocker.api.version=$(docker version --format '{{.Server.APIVersion}}')`.
+> Faster dev iteration (build once, then run only the IT): `source ~/.sdkman/bin/sdkman-init.sh && mvn -B -DskipTests package` then `mvn -B failsafe:integration-test failsafe:verify -Dit.test=PackagingSmokeIT`. If Docker rejects the API version locally, append `-Ddocker.api.version=$(docker version --format '{{.Server.APIVersion}}')`.
 
 - [ ] **Step 3: Negative check that the test actually exercises the packaging boundary (MANUAL — do NOT commit)**
 
-This confirms the IT catches a packaging/classloader break the in-JVM tests cannot. Do it by hand and revert; nothing here is committed.
+This confirms the IT catches a packaging/classloader break the in-JVM tests cannot. It deliberately does **not** touch `pom.xml`: the `trino-maven-plugin` `check-spi-dependencies` goal is bound to the `validate` phase and runs on *every* invocation (even with `-DskipTests`), and it rejects a non-SPI dependency scoped `provided` — so re-scoping `arangodb-java-driver` to `provided` would fail the build at `validate` instead of producing a driver-less bundle (and a direct failsafe run would then silently test the stale, correct bundle and pass green). Instead, break the *already-built* exploded bundle by hand:
 
-1. In `pom.xml`, temporarily change the `arangodb-java-driver` dependency scope from its current default (compile) to `<scope>provided</scope>` — this removes the driver jar from the packaged bundle while leaving it on the flat test classpath.
-2. Rebuild the bundle: `mvn -q -B -DskipTests package`.
-3. Run the IT: `mvn -B failsafe:integration-test failsafe:verify -Dit.test=PackagingSmokeIT`.
-   Expected: **FAILS** — Trino cannot start the `arango` catalog (the connector's `arangodb-java-driver` classes are missing from the isolated plugin classloader), so the container never reports `"starting":false` and setup fails (or, if it starts, the query fails). Check the Trino container log for a `ClassNotFoundException`/`NoClassDefFoundError` around `com.arangodb`.
-4. Confirm the in-JVM test stays green with the same broken pom: `mvn -q -B test -Dtest=ArangoConnectorQueryTest` → PASS (the driver is on the flat test classpath, so the in-JVM path can't see the packaging break).
-5. **Revert** the `pom.xml` scope change (`git checkout pom.xml`) and re-run `mvn -q -B -DskipTests package` to confirm the correct bundle rebuilds.
+1. Build the correct bundle: `source ~/.sdkman/bin/sdkman-init.sh && mvn -q -B -DskipTests package`.
+2. Remove the driver jar from the exploded plugin dir (simulating a runtime dep wrongly kept out of the bundle): `rm target/trino-arangodb-0.1.0-SNAPSHOT/arangodb-java-driver-7.13.0.jar`.
+3. Run ONLY the IT via direct failsafe goals — no lifecycle phase, so it uses the bundle you just broke. Do **not** run `package`/`verify` here (either would rebuild the complete bundle): `source ~/.sdkman/bin/sdkman-init.sh && mvn -B failsafe:integration-test failsafe:verify -Dit.test=PackagingSmokeIT`.
+   Expected: **FAILS** — the connector's `com.arangodb.*` classes are missing from the isolated plugin classloader, so the `arango` catalog fails to start; the Trino container never reports `"starting":false` and setup times out. Testcontainers dumps the container log on failed startup — look for `ClassNotFoundException`/`NoClassDefFoundError` around `com.arangodb`.
+4. Confirm the in-JVM test stays green (the driver is on the flat test classpath, so the in-JVM path cannot see the packaging break): `source ~/.sdkman/bin/sdkman-init.sh && mvn -q -B test -Dtest=ArangoConnectorQueryTest` → PASS.
+5. Restore the correct bundle: `source ~/.sdkman/bin/sdkman-init.sh && mvn -q -B -DskipTests package` (regenerates the full exploded dir, driver jar included). No `git` revert is needed — no tracked file was changed.
 
 - [ ] **Step 4: Commit (IT only — confirm pom.xml is reverted first)**
 

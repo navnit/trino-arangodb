@@ -151,8 +151,13 @@ which is the entire reason for the test. The artifact-upload step is unchanged.
 
 The test itself is the deliverable. It is validated by: (a) it passes green
 against the current, correct pom; and (b) a deliberate negative check during
-development — temporarily mis-scoping one `provided` dependency to `compile`
-(so it gets bundled) should make the smoke test fail at plugin load while the
-in-JVM tests stay green, confirming the test actually exercises the isolation
-boundary. The negative check is a manual development-time confirmation, not a
-committed test.
+development — after a normal `mvn -DskipTests package`, deleting the
+`arangodb-java-driver` jar from the exploded `target/trino-arangodb-<version>/`
+bundle and running the IT via direct failsafe goals should make the smoke test
+fail at catalog startup (`ClassNotFoundException` on `com.arangodb`) while the
+in-JVM tests stay green (the driver is on their flat test classpath),
+confirming the test actually exercises the isolation boundary. This deletes the
+already-built jar rather than re-scoping a dependency, because the
+`check-spi-dependencies` build-time validator (bound to `validate`, run even
+under `-DskipTests`) rejects re-scoping a non-SPI dependency to `provided`. The
+negative check is a manual development-time confirmation, not a committed test.
