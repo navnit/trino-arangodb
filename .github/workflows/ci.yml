@@ -29,9 +29,13 @@ jobs:
       # 'verify' runs the full test phase first: the suite is almost entirely
       # Testcontainers-based (a real arangodb/arangodb:3.12 container per test class,
       # plus DistributedQueryRunner end-to-end tests), which needs Docker. It then runs
-      # the failsafe integration test (PackagingSmokeIT), which boots a real
-      # trinodb/trino:476 container with the just-packaged plugin mounted and queries it
-      # over JDBC. GitHub's ubuntu-latest runners ship Docker, so no extra setup is needed.
+      # the failsafe integration tests (no -Dit.test filter is set, so every *IT.java class
+      # runs): PackagingSmokeIT, which boots a real trinodb/trino:476 container with the
+      # just-packaged plugin mounted and queries it over JDBC; and the M3 shard-parallel
+      # cluster ITs (ShardParallelClusterIT, ShardParallelCorrectnessIT), which boot a real
+      # multi-node ArangoDB cluster (coordinator/agency/dbservers) via Testcontainers'
+      # ComposeContainer to prove shard fan-out end-to-end. GitHub's ubuntu-latest runners
+      # ship both Docker and the Docker Compose v2 CLI, so no extra setup is needed.
       #
       # pom.xml pins the Testcontainers-shaded docker-java client's Remote API version
       # (surefire/failsafe api.version property) to work around its lack of negotiation. Its
