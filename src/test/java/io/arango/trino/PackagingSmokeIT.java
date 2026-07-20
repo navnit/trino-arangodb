@@ -116,14 +116,24 @@ class PackagingSmokeIT {
             Thread.sleep(1000);
         }
         throw new IllegalStateException(
-                "Trino did not become queryable within 60s of startup", lastFailure);
+                "Trino did not become queryable within 60s of startup"
+                        + (lastFailure != null ? " (last failure: " + lastFailure + ")" : ""),
+                lastFailure);
     }
 
     @AfterAll
     void teardown() {
-        if (trino != null) trino.stop();
-        if (arango != null) arango.close();
-        if (network != null) network.close();
+        // Attempt every close even if an earlier one throws, so a failure stopping the Trino
+        // container cannot leak the ArangoDB container or the shared network.
+        try {
+            if (trino != null) trino.stop();
+        } finally {
+            try {
+                if (arango != null) arango.close();
+            } finally {
+                if (network != null) network.close();
+            }
+        }
     }
 
     private Connection connect() throws Exception {
