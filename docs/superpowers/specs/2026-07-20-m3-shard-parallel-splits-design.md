@@ -50,6 +50,7 @@ Everything below serves one invariant:
 | `ArangoPageSourceProvider` | If `split.shardIds()` non-empty → pass `AqlQueryOptions().shardIds(...)`; else current path. |
 | `aql/AqlBuilder` | **Unchanged.** Shard scoping is a query *option*, not an AQL-string change — clean separation from pushdown. |
 | `ArangoConfig` | `+ arangodb.shards-per-split` (default 1), `+ arangodb.max-splits` (safety cap), `+ arangodb.shard-parallelism-enabled` (default true — new; see §11). |
+| `ArangoMetadata` (modify) | `applyLimit` must report `limitGuaranteed=false` when shard-parallelism is enabled: once a table fans out, a pushed `LIMIT n` is a *per-split* reduction (total ≤ n × splits), so Trino must apply the final `LIMIT` (master spec §6.2). Today it hardcodes `true` on the single-split assumption — a correctness bug under M3 if left. |
 
 ---
 
@@ -99,7 +100,10 @@ All five are required; each maps to a concrete implementation here.
 
 **8.1 Version pin.** Assert a minimum ArangoDB server version at connector startup (master spec §0 assumes ≥ 3.11); refuse shard-splitting below it (→ single split, WARN). Read via `ArangoClient.serverVersion()`. The minimum is a named constant, documented in `CLAUDE.md` and the README.
 
-**8.2 Capability probe.** Before the first fan-out, actively verify the server honors `shardIds` — a shard-scoped count on a single shard of an eligible (>1-shard) collection must be `< ` the full count. Implementation: **lazy on first fan-out, cached for the connector's process lifetime** (see §11 — reinterprets the reviewed spec's "startup" wording, because no guaranteed multi-shard collection exists at boot). Probe the very collection about to be fanned out: `Σ(per-shard counts) == full count` **and** at least one shard's count `< full count`. If the probe is inconclusive or the server ignored the option (shard-scoped count `==` full count), disable fan-out connector-wide, cache that verdict, WARN, and fall back.
+**8.2 Capability probe.** Before the first fan-out, actively verify the server honors `shardIds` by probing the **actual shard groups about to be emitted** (`ShardGrouping.partition(...)`), counting through the **same `shardIds`-scoped query path a real split uses** — so multi-element `shardIds` arrays are exercised, not just singletons (a server could honor a one-element array but mishandle a multi-element one; probing singletons would miss that). The probe passes iff `Σ(per-group counts) == full count` **and** at least one group's count `< full count`. Implementation: **lazy on first fan-out, cached for the connector's process lifetime** (see §11 — reinterprets the reviewed spec's "startup" wording, because no guaranteed multi-shard collection exists at boot), with a **three-state verdict** to avoid latching on a degenerate first call:
+- *conclusive pass* (`Σ == full` and a group is narrower) ⇒ cache `ENABLED`;
+- *conclusive failure* (`Σ ≠ full` — the server ignored the option, or version below the pin) ⇒ cache `DISABLED` connector-wide + WARN;
+- *inconclusive* (empty collection where `full == 0`; all data in one group so nothing is narrower; or a thrown exception) ⇒ **do not cache** — stay `UNKNOWN`, fall back to a single split for *this* query only, and retry the probe on the next fan-out. This prevents a transient error or an empty first collection from permanently and silently disabling parallelism for the process lifetime.
 
 **8.3 CI correctness gate.** An automated test asserting per-shard counts **sum to** the collection count, on a real cluster (§9).
 
@@ -116,7 +120,7 @@ All five are required; each maps to a concrete implementation here.
 - **Count-sum gate (§8.3):** seed a collection with `numberOfShards = 3` and K documents; assert `Σ(per-shard scan counts) == full collection count` **and** each `_key` appears in exactly one shard's scan (proves *no gaps and no dupes*, not just a matching total).
 - **N ⇒ splits:** `getSplits` on the 3-shard collection yields the expected split count for the configured `(S, M)`.
 - **Cap grouping:** with `M < ceil(N/S)`, assert exactly `M` splits and the count-sum still holds.
-- **Fallback proven:** (a) a single-server collection ⇒ 1 split; (b) `shard-parallelism-enabled=false` ⇒ 1 split even on the cluster; (c) a gate-rejected strategy ⇒ 1 split.
+- **Fallback proven:** (a) a single-server collection ⇒ 1 split; (b) `shard-parallelism-enabled=false` ⇒ 1 split even on the cluster; (c) a gate-rejected (SmartGraph / smart-strategy) collection ⇒ 1 split — **verified at the unit level** via `ShardEligibility` + the single-node `ArangoSplitManager` fallback test (identical `ineligibilityReason().isPresent()` branch), because SmartGraph requires ArangoDB Enterprise and the CI cluster runs Community Edition. The cluster IT cannot construct a smart collection, so this case is intentionally proven off-cluster, not silently dropped.
 - **Capability probe:** a positive-path assertion that the probe passes on a real cluster.
 
 **Unit tests (no cluster):** the pure grouping/partition function (§7) and the allowlist-gate predicate (§6) over representative property combinations, including every `ShardingStrategy` constant and the `numberOfShards ∈ {null, 1, >1}` boundaries.

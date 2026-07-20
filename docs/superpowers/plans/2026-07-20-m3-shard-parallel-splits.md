@@ -581,7 +581,8 @@ class ArangoClientShardingTest {
     @BeforeAll
     static void setup() {
         server = new TestingArangoServer();
-        client = new ArangoClient(server.config());
+        client = new ArangoClient(new ArangoConfig()
+                .setHosts(server.hostPort()).setUser("root").setPassword(server.rootPassword()));
         client.createDatabaseForTest(DB);
         client.createDocumentCollectionForTest(DB, COLL);
         for (int i = 0; i < 5; i++) {
@@ -636,7 +637,7 @@ class ArangoClientShardingTest {
 }
 ```
 
-*(Assumes `TestingArangoServer.config()` returns an `ArangoConfig` pointed at the container — confirm the existing accessor name; if it differs, e.g. `getConfig()`, use that.)*
+*(`TestingArangoServer` exposes `host()`/`port()`/`hostPort()`/`rootPassword()` — there is **no** `config()` accessor — so build the `ArangoConfig` manually, exactly as `src/test/java/io/arango/trino/client/ArangoClientTest.java` already does.)*
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -720,7 +721,7 @@ git commit -m "feat: ArangoClient shard discovery, enumeration, shard-scoped cou
 **Interfaces:**
 - Consumes: `ArangoClient` (Task 5: `serverVersion()`, `countWithShardIds(...)`).
 - Produces:
-  - `boolean canFanOut(String database, String collection, List<String> shardIds)` — true only if version pin passes AND an active probe confirms `shardIds` narrows results; verdict computed once and cached process-wide.
+  - `boolean canFanOut(String database, String collection, List<List<String>> groups)` — true only if the version pin passes AND an active probe **over the actual emit groups** confirms `shardIds` narrows results. A *conclusive* verdict (ENABLED / server-ignores-shardIds) is cached process-wide; an *inconclusive* one (empty collection / exception / all-data-in-one-group) is NOT cached and is retried on the next fan-out.
   - `static boolean sumMatchesFull(ArangoClient client, String db, String coll, List<List<String>> groups)` — the shared Σ(per-group counts)==full-count check, reused by the probe **and** the Task 9 IT (so probe and CI verify the same computation).
   - `static boolean isVersionAtLeastMinimum(String actual)`; `static final String MIN_ARANGO_VERSION = "3.11"`.
 
@@ -747,8 +748,8 @@ class ShardFanoutCapabilityTest {
     // Hand-written test double (no network; ArangoDB driver connects lazily so super(config) is safe).
     private static final class FakeClient extends ArangoClient {
         private final String version;
-        private final long full;
-        private final Map<String, Long> perShard;
+        long full;                    // mutable so a test can simulate an initially-empty collection
+        Map<String, Long> perShard;
         final AtomicInteger versionCalls = new AtomicInteger();
 
         FakeClient(String version, long full, Map<String, Long> perShard) {
@@ -790,14 +791,14 @@ class ShardFanoutCapabilityTest {
     void enabledWhenVersionAndProbePass() {
         FakeClient client = new FakeClient("3.12.0", 100, Map.of("s1", 60L, "s2", 40L));
         ShardFanoutCapability cap = new ShardFanoutCapability(client);
-        assertTrue(cap.canFanOut("db", "c", List.of("s1", "s2")));
+        assertTrue(cap.canFanOut("db", "c", List.of(List.of("s1"), List.of("s2"))));
     }
 
     @Test
     void disabledBelowVersionPin() {
         FakeClient client = new FakeClient("3.10.5", 100, Map.of("s1", 60L, "s2", 40L));
         ShardFanoutCapability cap = new ShardFanoutCapability(client);
-        assertFalse(cap.canFanOut("db", "c", List.of("s1", "s2")));
+        assertFalse(cap.canFanOut("db", "c", List.of(List.of("s1"), List.of("s2"))));
     }
 
     @Test
@@ -805,17 +806,29 @@ class ShardFanoutCapabilityTest {
         // server ignores shardIds -> every shard-scoped count == full -> sum (200) != full (100)
         FakeClient client = new FakeClient("3.12.0", 100, Map.of("s1", 100L, "s2", 100L));
         ShardFanoutCapability cap = new ShardFanoutCapability(client);
-        assertFalse(cap.canFanOut("db", "c", List.of("s1", "s2")));
+        assertFalse(cap.canFanOut("db", "c", List.of(List.of("s1"), List.of("s2"))));
     }
 
     @Test
     void verdictIsCachedAfterFirstCall() {
         FakeClient client = new FakeClient("3.12.0", 100, Map.of("s1", 60L, "s2", 40L));
         ShardFanoutCapability cap = new ShardFanoutCapability(client);
-        cap.canFanOut("db", "c", List.of("s1", "s2"));
+        cap.canFanOut("db", "c", List.of(List.of("s1"), List.of("s2")));
         int afterFirst = client.versionCalls.get();
-        cap.canFanOut("db", "c", List.of("s1", "s2"));
+        cap.canFanOut("db", "c", List.of(List.of("s1"), List.of("s2")));
         assertEquals(afterFirst, client.versionCalls.get(), "probe must not re-run after the verdict is cached");
+    }
+
+    @Test
+    void inconclusiveFirstCallDoesNotLatch() {
+        // Empty collection on first probe -> inconclusive; must NOT cache DISABLED permanently.
+        FakeClient client = new FakeClient("3.12.0", 0, Map.of());
+        ShardFanoutCapability cap = new ShardFanoutCapability(client);
+        assertFalse(cap.canFanOut("db", "c", List.of(List.of("s1"), List.of("s2"))));
+        // Collection later has data -> the retry must now succeed (proves no permanent latch).
+        client.full = 100;
+        client.perShard = Map.of("s1", 60L, "s2", 40L);
+        assertTrue(cap.canFanOut("db", "c", List.of(List.of("s1"), List.of("s2"))));
     }
 }
 ```
@@ -855,27 +868,44 @@ public class ShardFanoutCapability {
      * shardIds option actually narrows results. Computed once on the first eligible collection and
      * cached for the connector's process lifetime (spec §8.2 — lazy-first-fan-out interpretation).
      */
-    public boolean canFanOut(String database, String collection, List<String> shardIds) {
+    public boolean canFanOut(String database, String collection, List<List<String>> groups) {
         if (verdict.get() == Verdict.UNKNOWN) {
-            verdict.compareAndSet(Verdict.UNKNOWN, compute(database, collection, shardIds));
+            Verdict computed = compute(database, collection, groups);
+            if (computed != Verdict.UNKNOWN) {          // only a CONCLUSIVE verdict latches
+                verdict.compareAndSet(Verdict.UNKNOWN, computed);
+            }
+            return computed == Verdict.ENABLED;         // inconclusive -> false this call, retried next
         }
         return verdict.get() == Verdict.ENABLED;
     }
 
-    private Verdict compute(String database, String collection, List<String> shardIds) {
+    // Probes the ACTUAL groups about to be emitted (so multi-element shardIds arrays are exercised).
+    // ENABLED / DISABLED are conclusive (cached); UNKNOWN is inconclusive (not cached, retried).
+    private Verdict compute(String database, String collection, List<List<String>> groups) {
         try {
             if (!isVersionAtLeastMinimum(client.serverVersion())) {
-                return Verdict.DISABLED;
+                return Verdict.DISABLED;                 // conclusive: too old, will not improve
             }
             long full = client.countWithShardIds(database, collection, List.of());
-            List<List<String>> singletons = shardIds.stream().map(List::of).toList();
-            boolean anyNarrower = singletons.stream()
-                    .anyMatch(g -> client.countWithShardIds(database, collection, g) < full);
-            boolean sums = sumMatchesFull(client, database, collection, singletons);
-            return (sums && anyNarrower) ? Verdict.ENABLED : Verdict.DISABLED;
+            if (full == 0) {
+                return Verdict.UNKNOWN;                   // inconclusive: empty collection, retry later
+            }
+            long sum = 0;
+            boolean anyNarrower = false;
+            for (List<String> group : groups) {
+                long c = client.countWithShardIds(database, collection, group);
+                sum += c;
+                if (c < full) {
+                    anyNarrower = true;
+                }
+            }
+            if (sum != full) {
+                return Verdict.DISABLED;                  // conclusive: server ignored shardIds -> would N×-duplicate
+            }
+            return anyNarrower ? Verdict.ENABLED : Verdict.UNKNOWN; // all-in-one-group -> can't confirm narrowing, retry
         }
         catch (RuntimeException e) {
-            return Verdict.DISABLED; // inconclusive -> fail safe (master spec §5.1.4)
+            return Verdict.UNKNOWN;                       // inconclusive: transient, fall back this call, retry later
         }
     }
 
@@ -936,7 +966,9 @@ git commit -m "feat: version pin + cached shardIds capability probe"
 - Modify: `src/main/java/io/arango/trino/ArangoSplitManager.java`
 - Modify: `src/main/java/io/arango/trino/ArangoPageSourceProvider.java`
 - Modify: `src/main/java/io/arango/trino/ArangoModule.java` (bind `ShardFanoutCapability` singleton)
+- Modify: `src/main/java/io/arango/trino/ArangoMetadata.java` — `applyLimit` must report `limitGuaranteed=false` once a table can fan out (master spec §6.2 blocker)
 - Test: `src/test/java/io/arango/trino/ArangoSplitManagerTest.java` (single-node: disabled-flag and single-shard both ⇒ one split)
+- Test: `src/test/java/io/arango/trino/ArangoMetadataLimitTest.java`
 
 **Interfaces:**
 - Consumes: `ArangoConfig` (Task 2), `ArangoClient` (Task 5), `ShardEligibility`/`ShardGrouping`/`ShardFanoutCapability`/`ShardingInfo` (Tasks 3/4/6), `ArangoSplit` (Task 1), `ArangoTableHandle.schema()/.table()`.
@@ -973,7 +1005,8 @@ class ArangoSplitManagerTest {
     @BeforeAll
     static void setup() {
         server = new TestingArangoServer();
-        client = new ArangoClient(server.config());
+        client = new ArangoClient(new ArangoConfig()
+                .setHosts(server.hostPort()).setUser("root").setPassword(server.rootPassword()));
         client.createDatabaseForTest(DB);
         client.createDocumentCollectionForTest(DB, COLL);
         client.insertForTest(DB, COLL, Map.of("_key", "k0", "v", 0));
@@ -986,8 +1019,9 @@ class ArangoSplitManagerTest {
     }
 
     private static ArangoTableHandle handle() {
-        // Use whatever the M2 constructor requires; only schema()/table() are read here.
-        return new ArangoTableHandle(DB, COLL, io.trino.spi.predicate.TupleDomain.all(), java.util.OptionalLong.empty());
+        // ArangoTableHandle is a 5-arg record: (String schema, String table, boolean edge,
+        // TupleDomain<ColumnHandle> constraint, OptionalLong limit). Only schema()/table() are read here.
+        return new ArangoTableHandle(DB, COLL, false, io.trino.spi.predicate.TupleDomain.all(), java.util.OptionalLong.empty());
     }
 
     private static List<ArangoSplit> collect(ArangoSplitManager mgr) {
@@ -1098,13 +1132,13 @@ public class ArangoSplitManager implements ConnectorSplitManager {
             if (shardIds.size() <= 1) {
                 return List.of(SINGLE);
             }
-            if (!capability.canFanOut(db, coll, shardIds)) {
+            List<List<String>> groups = ShardGrouping.partition(shardIds, config.getShardsPerSplit(), config.getMaxSplits());
+            if (!capability.canFanOut(db, coll, groups)) { // probe the ACTUAL groups we would emit
                 log.warn("Collection %s.%s scanned serially: server did not confirm the shardIds option "
                         + "(version pin or capability probe failed)", db, coll);
                 return List.of(SINGLE);
             }
-            return ShardGrouping.partition(shardIds, config.getShardsPerSplit(), config.getMaxSplits())
-                    .stream().map(ArangoSplit::new).toList();
+            return groups.stream().map(ArangoSplit::new).toList();
         }
         catch (RuntimeException e) {
             log.warn(e, "Collection %s.%s scanned serially: shard discovery failed", db, coll);
@@ -1140,19 +1174,73 @@ After the `ArangoSplitManager` binding, add:
         binder.bind(io.arango.trino.split.ShardFanoutCapability.class).in(Scopes.SINGLETON);
 ```
 
-- [ ] **Step 6: Run tests to verify they pass**
+- [ ] **Step 6: Write the failing `limitGuaranteed` test (master-spec §6.2 blocker)**
 
-Run: `source ~/.sdkman/bin/sdkman-init.sh && mvn test -Dtest=ArangoSplitManagerTest && mvn test`
-Expected: `ArangoSplitManagerTest` PASS (2 tests); full unit suite still green (Guice wiring compiles, `ArangoConnectorQueryTest` unaffected — empty `shardIds` preserves the old read path).
+Once a table can fan out, each split applies `LIMIT n` independently, so a pushed limit is a per-split reduction, not an exact cap. `applyLimit` must report `limitGuaranteed=false` whenever shard-parallelism is enabled (a table *might* fan out), and `true` only when it is disabled (always single split). Construct `ArangoMetadata` exactly as the existing `ArangoMetadataTest` does (test-double `ArangoClient`), passing the config under test.
 
-- [ ] **Step 7: Commit**
+```java
+package io.arango.trino;
+
+import io.trino.spi.connector.ConnectorTableHandle;
+import io.trino.spi.connector.LimitApplicationResult;
+import org.junit.jupiter.api.Test;
+
+import java.util.Optional;
+
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class ArangoMetadataLimitTest {
+    // newMetadata(config), tableHandle(), and SESSION follow ArangoMetadataTest's existing
+    // test-double pattern (no live server needed — applyLimit's limitGuaranteed depends only on config).
+
+    @Test
+    void limitNotGuaranteedWhenParallelismEnabled() {
+        ArangoMetadata metadata = newMetadata(new ArangoConfig()); // parallelism enabled by default
+        Optional<LimitApplicationResult<ConnectorTableHandle>> r = metadata.applyLimit(SESSION, tableHandle(), 10);
+        assertTrue(r.isPresent());
+        assertFalse(r.get().limitGuaranteed(), "a fan-out-capable table must not report an exact limit");
+    }
+
+    @Test
+    void limitGuaranteedWhenParallelismDisabled() {
+        ArangoMetadata metadata = newMetadata(new ArangoConfig().setShardParallelismEnabled(false));
+        Optional<LimitApplicationResult<ConnectorTableHandle>> r = metadata.applyLimit(SESSION, tableHandle(), 10);
+        assertTrue(r.isPresent());
+        assertTrue(r.get().limitGuaranteed(), "a single-split table reports an exact limit");
+    }
+}
+```
+
+*(Copy `newMetadata`/`tableHandle`/`SESSION` from `ArangoMetadataTest` verbatim — the exact `ArangoMetadata` constructor arity and `applyLimit(session, handle, limit)` signature live there.)*
+
+- [ ] **Step 7: Fix `ArangoMetadata.applyLimit`**
+
+`ArangoMetadata` already injects `ArangoConfig config`. Replace the hardcoded `limitGuaranteed=true` (whose comment reads "M2 is single-split always") with:
+
+```java
+        // Exact only for a single-split scan. With shard-parallelism enabled the table may fan out
+        // (ArangoSplitManager), and each split applies LIMIT n independently (total ≤ n × splits), so
+        // Trino must apply the final LIMIT -> report false. Disabled ⇒ always one split ⇒ exact ⇒ true.
+        boolean limitGuaranteed = !config.isShardParallelismEnabled();
+        return Optional.of(new LimitApplicationResult<>(handle.withLimit(limit), limitGuaranteed, false));
+```
+
+- [ ] **Step 8: Run tests to verify they pass**
+
+Run: `source ~/.sdkman/bin/sdkman-init.sh && mvn test -Dtest=ArangoSplitManagerTest,ArangoMetadataLimitTest && mvn test`
+Expected: both new classes PASS; full unit suite green (empty `shardIds` preserves the old read path). **If the existing `ArangoMetadataTest` asserts `limitGuaranteed=true`, update it** — with the default config (parallelism enabled) the value is now `false`; add `.setShardParallelismEnabled(false)` to that test's config to keep asserting `true`, or flip its expectation.
+
+- [ ] **Step 9: Commit**
 
 ```bash
 git add src/main/java/io/arango/trino/ArangoSplitManager.java \
         src/main/java/io/arango/trino/ArangoPageSourceProvider.java \
         src/main/java/io/arango/trino/ArangoModule.java \
-        src/test/java/io/arango/trino/ArangoSplitManagerTest.java
-git commit -m "feat: wire shard-parallel split generation with safe fallback"
+        src/main/java/io/arango/trino/ArangoMetadata.java \
+        src/test/java/io/arango/trino/ArangoSplitManagerTest.java \
+        src/test/java/io/arango/trino/ArangoMetadataLimitTest.java
+git commit -m "feat: wire shard-parallel splits; limitGuaranteed=false under multi-split"
 ```
 
 ---
@@ -1321,7 +1409,7 @@ Add the sharded-collection test helper to `ArangoClient` (next to the existing `
 
 Run: `source ~/.sdkman/bin/sdkman-init.sh && mvn verify -Dit.test=ShardParallelClusterIT -DskipUTs=false`
 (If the module's Failsafe binding uses a different property, run `mvn verify -Dit.test=ShardParallelClusterIT`.)
-Expected: PASS (2 tests). **If the cluster does not boot, fix the compose file here — this task's sole job is a reliably-booting cluster.** Common fixes: bump `withStartupTimeout`, correct `arangod` role args against the 3.12 reference, ensure coordinator waits on dbservers.
+Expected: PASS (2 tests). **If the cluster does not boot, fix the compose file here — this task's sole job is a reliably-booting cluster.** Common fixes: bump `withStartupTimeout`; correct `arangod` role args against the 3.12 reference; add `healthcheck:` blocks (agency + dbservers) so `depends_on` waits for *readiness* rather than mere container start — `depends_on` alone only orders start, a likely flakiness source given the coordinator races the agency/dbservers.
 
 - [ ] **Step 5: Commit**
 
@@ -1396,7 +1484,8 @@ class ShardParallelCorrectnessIT {
     }
 
     private static ArangoTableHandle handle() {
-        return new ArangoTableHandle(DB, COLL, TupleDomain.all(), OptionalLong.empty());
+        // 5-arg record: (schema, table, edge, constraint, limit).
+        return new ArangoTableHandle(DB, COLL, false, TupleDomain.all(), OptionalLong.empty());
     }
 
     private static List<ArangoSplit> splits(ArangoConfig config) {
@@ -1528,9 +1617,10 @@ git commit -m "docs: document shard-parallel splits (M3) + run cluster ITs in CI
 | §10 per-shard execution (AqlBuilder untouched) | Task 5 (query overload), Task 7 (threading) |
 | §11 kill-switch deviation | Task 2 + Task 7 |
 | §12 WARN observability | Task 7 (explicit multi-shard WARN branch) |
+| **master-spec §6.2** — `limitGuaranteed=false` under multi-split | Task 7 (Steps 6–7) — added after Fable review |
 
-No gaps.
+No gaps. (The Fable review caught that the original plan checked coverage only against the M3 design spec's own item list and missed the master-spec §6.2 `limitGuaranteed` requirement — a real correctness bug under multi-split. Now covered by Task 7 Steps 6–7 and listed in the M3 design spec §4 components table.)
 
-**2. Placeholder scan:** No "TBD"/"handle edge cases"/"similar to". Two explicit "confirm the exact name" notes (`TestingArangoServer.config()` accessor, `ArangoTableHandle` constructor arity) are real verification steps against existing code, with concrete fallbacks — not deferred work. The compose file is concrete with a named acceptance gate (Task 8 Step 4).
+**2. Placeholder scan:** No "TBD"/"handle edge cases"/"similar to". The test config construction (`new ArangoConfig().setHosts(server.hostPort()).setUser("root").setPassword(server.rootPassword())`) and the 5-arg `ArangoTableHandle(schema, table, edge, constraint, limit)` are concrete (both corrected after the Fable review — `TestingArangoServer` has no `config()` accessor and the handle record is 5-arg, verified against source). The "copy from `ArangoMetadataTest`" pointers reference an existing test-double harness rather than inventing one. The compose file is concrete with a named acceptance gate (Task 8 Step 4).
 
 **3. Type consistency:** `ArangoSplit(List<String> shardIds)`, `ShardGrouping.partition(List,int,int)→List<List<String>>`, `ShardingInfo(Integer,String,String)`, `ShardEligibility.ineligibilityReason(ShardingInfo)→Optional<String>`, `ShardFanoutCapability.canFanOut(String,String,List<String>)→boolean` / `sumMatchesFull(ArangoClient,String,String,List<List<String>>)→boolean`, `ArangoClient.{getShardingInfo,listShardIds,serverVersion,countWithShardIds,query(...,List<String>)}` — names/signatures match across all consuming tasks.
