@@ -17,11 +17,15 @@ import io.trino.spi.expression.FieldDereference;
 import io.trino.spi.expression.Variable;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.predicate.ValueSet;
 import io.trino.spi.type.ArrayType;
+import io.trino.spi.type.BigintType;
 import io.trino.spi.type.BooleanType;
 import io.trino.spi.type.DecimalType;
+import io.trino.spi.type.DoubleType;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.VarcharType;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -43,14 +47,16 @@ public class ArangoMetadata implements ConnectorMetadata {
 
     private final ArangoClient client;
     private final SchemaResolver schemaResolver;
+    private final ArangoConfig config;
     // M1: unbounded per-connector memoization so one SELECT samples a collection once;
     // spec §4.3 TTL cache lands in a later milestone.
     private final Map<SchemaTableName, List<ArangoColumn>> columnCache = new ConcurrentHashMap<>();
 
     @Inject
-    public ArangoMetadata(ArangoClient client, SchemaResolver schemaResolver) {
+    public ArangoMetadata(ArangoClient client, SchemaResolver schemaResolver, ArangoConfig config) {
         this.client = client;
         this.schemaResolver = schemaResolver;
+        this.config = config;
     }
 
     @Override
@@ -142,6 +148,14 @@ public class ArangoMetadata implements ConnectorMetadata {
         if (newDomain.isNone() || newDomain.isAll()) {
             return Optional.empty();
         }
+        // If a LIMIT is already pushed onto this handle, a further filter push would render as
+        // FILTER-before-LIMIT in the single-FOR AQL scan (AqlBuilder.buildScan), reordering the
+        // semantics of `(... LIMIT n) WHERE p` (limit-then-filter) into filter-then-limit. Decline the
+        // push and leave the filter residual (base-JDBC does the same). The common `WHERE p LIMIT n`
+        // shape is unaffected -- Trino pushes the filter first, before any limit exists on the handle.
+        if (handle.limit().isPresent()) {
+            return Optional.empty();
+        }
 
         Map<ColumnHandle, Domain> domains = newDomain.getDomains().orElseThrow();
         ImmutableMap.Builder<ColumnHandle, Domain> pushedBuilder = ImmutableMap.builder();
@@ -151,6 +165,9 @@ public class ArangoMetadata implements ConnectorMetadata {
             Domain domain = entry.getValue();
             if (isPushable(column.type(), domain)) {
                 pushedBuilder.put(column, domain);
+                if (isPrefilterOnly(column.type(), domain)) {
+                    residualBuilder.put(column, domain); // Trino re-checks the AQL prefilter's superset
+                }
             }
             else {
                 residualBuilder.put(column, domain);
@@ -169,38 +186,54 @@ public class ArangoMetadata implements ConnectorMetadata {
         return Optional.of(new ConstraintApplicationResult<>(newHandle, residual, constraint.getExpression(), false));
     }
 
-    // Only BOOLEAN equality/IN is pushed down; every other predicate stays in Trino's residual
-    // filter. This is deliberately narrow. AQL's `==`/`IN` compare type-strictly and never
-    // coerce, but ArangoPageSource.appendValue coerces leniently on read (String.valueOf() for
-    // VARCHAR, Number.longValue()/doubleValue() for BIGINT/DOUBLE). So for VARCHAR/BIGINT/DOUBLE,
-    // whenever a document's stored value type diverges from the column's sampled/inferred type,
-    // the AQL-side raw comparison and Trino's own post-coercion comparison can silently disagree
-    // -- and because the predicate was reported fully pushed, no residual re-check catches it
-    // (rows vanish or wrongly match, with no error). BOOLEAN is the one case that provably cannot
-    // diverge: a non-Boolean stored value coerces to Trino NULL (appendValue's else-branch) AND
-    // fails AQL's strict `== <bool>` -- both sides always exclude, so the pushed and residual
-    // answers agree. VARCHAR/BIGINT/DOUBLE (equality, IN, and ranges alike) are therefore left
-    // entirely residual, for the same reason IS NULL/IS NOT NULL already are (see the null-check
-    // comment below and Global Constraints). Found and resolved during the M2 final whole-branch
-    // review; earlier revisions wrongly assumed equality/IN was safe to push unguarded for every
-    // type.
-    private static boolean isPushable(Type type, Domain domain) {
+    // Widened M2 pushdown. The read path (ArangoPageSource.appendValue) is type-exact, so a pushed
+    // AQL predicate and Trino's residual re-check admit exactly the same values (the core invariant).
+    // Equality/IN need no guard (AQL ==/IN are type-strict); numeric range is guarded in AqlBuilder.
+    private boolean isPushable(Type type, Domain domain) {
         if (domain.isAll()) {
             return false;
         }
-        // Excludes IS NULL / IS NOT NULL (and any null-allowing domain): AQL's `== null`/`!= null`
-        // test the raw stored value, while ArangoPageSource.appendValue leniently coerces any
-        // type-mismatched value to Trino NULL. A value outside SchemaResolver's sample (or one the
-        // inferred type doesn't fit) would answer these predicates differently in AQL than in
-        // Trino, silently dropping or including rows. Left residual, Trino re-applies them
-        // post-coercion.
+        // STRICT coercion: a pushed filter would exclude a type-mismatched row server-side and thus
+        // suppress the ARANGODB_TYPE_CONVERSION_ERROR strict mode must raise. Keep results (and
+        // errors) independent of pushdown by pushing nothing (spec §5).
+        if (config.getTypeCoercion() == ArangoConfig.TypeCoercion.STRICT) {
+            return false;
+        }
+        // IS NULL / IS NOT NULL and any null-allowing domain stay residual: AQL == null/!= null test
+        // the raw stored value, which diverges from Trino's post-coercion null-ness on a type mismatch.
         if (domain.isNullAllowed()) {
             return false;
         }
-        if (domain.getValues().isAll()) {
+        ValueSet values = domain.getValues();
+        if (values.isAll()) {
             return false;
         }
-        return type.equals(BooleanType.BOOLEAN) && domain.getValues().isDiscreteSet();
+        // Equality / IN: pushable for every scalar type (no guard needed).
+        if (values.isDiscreteSet()) {
+            return type.equals(BooleanType.BOOLEAN)
+                    || type instanceof VarcharType
+                    || type.equals(BigintType.BIGINT)
+                    || type.equals(DoubleType.DOUBLE);
+        }
+        // Numeric range: BIGINT and DOUBLE (guarded by AqlBuilder). DOUBLE is fully enforced; BIGINT
+        // is prefilter-only (see isPrefilterOnly / applyFilter). String range stays residual.
+        return type.equals(BigintType.BIGINT) || type.equals(DoubleType.DOUBLE);
+    }
+
+    // A pushable predicate whose AQL form admits a SUPERSET of what appendValue writes non-NULL, so
+    // it must ALSO stay in Trino's residual for a post-read re-check. Only BIGINT range qualifies: its
+    // bare IS_NUMBER guard (AqlBuilder) admits fractional values and integral values outside signed-64-bit
+    // range, both of which appendValue reads as NULL -- the residual re-check drops them. We cannot tighten
+    // the guard to integers-in-range: AQL FLOOR() returns a double and would false-miss a stored int64
+    // > 2^53 (review finding C3). Everything else is fully enforced, never prefilter-only:
+    //   - Equality/IN agrees for every type: ArangoDB compares by exact value and the BIGINT read path
+    //     is exact (longValue(), no rounding); DOUBLE eq/IN promotes its operand with `+ 0.0`.
+    //   - DOUBLE range agrees because AqlBuilder promotes the DOUBLE operand into double space with
+    //     `+ 0.0`, matching appendValue's n.doubleValue() rounding; a bare comparison would diverge for
+    //     a stored int64 > 2^53 (review finding C1).
+    // (Review finding C2, option 2, covers the BIGINT-range superset handling.)
+    private static boolean isPrefilterOnly(Type type, Domain domain) {
+        return type.equals(BigintType.BIGINT) && !domain.getValues().isDiscreteSet();
     }
 
     @Override
