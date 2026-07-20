@@ -106,6 +106,14 @@
             <version>${dep.trino.version}</version>
             <scope>test</scope>
         </dependency>
+        <!-- JDBC client for the end-to-end packaging smoke test (PackagingSmokeIT):
+             connects to a real trinodb/trino container over its mapped HTTP port. -->
+        <dependency>
+            <groupId>io.trino</groupId>
+            <artifactId>trino-jdbc</artifactId>
+            <version>${dep.trino.version}</version>
+            <scope>test</scope>
+        </dependency>
         <!-- Not in brief's Step 3 verbatim listing: forced additions, discovered running T9's
              DistributedQueryRunner-based test (the first task to exercise trino-testing's
              TestingDiscoveryServer). trino-testing:476 needs io.airlift.discovery:discovery-server,
@@ -243,6 +251,32 @@
                         <api.version>${docker.api.version}</api.version>
                     </systemPropertyVariables>
                 </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>3.5.2</version>
+                <configuration>
+                    <!-- Docker Remote API workaround, same as surefire: failsafe is a
+                         separate plugin and does NOT inherit surefire's config, so the
+                         Testcontainers-shaded docker-java client needs api.version here too. -->
+                    <systemPropertyVariables>
+                        <api.version>${docker.api.version}</api.version>
+                        <!-- Absolute path to the exploded plugin dir produced by `package`
+                             (target/trino-arangodb-<version>). PackagingSmokeIT mounts it
+                             into the Trino container. Passed as a property so the test never
+                             globs or hardcodes a version string. -->
+                        <plugin.dir>${project.build.directory}/${project.build.finalName}</plugin.dir>
+                    </systemPropertyVariables>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>

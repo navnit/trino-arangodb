@@ -26,13 +26,15 @@ jobs:
           java-version: '24'
           cache: maven
 
-      # 'package' runs the full test phase first: the suite is almost entirely
+      # 'verify' runs the full test phase first: the suite is almost entirely
       # Testcontainers-based (a real arangodb/arangodb:3.12 container per test class,
-      # plus DistributedQueryRunner end-to-end tests), which needs Docker. GitHub's
-      # ubuntu-latest runners ship Docker, so no extra service setup is required.
+      # plus DistributedQueryRunner end-to-end tests), which needs Docker. It then runs
+      # the failsafe integration test (PackagingSmokeIT), which boots a real
+      # trinodb/trino:476 container with the just-packaged plugin mounted and queries it
+      # over JDBC. GitHub's ubuntu-latest runners ship Docker, so no extra setup is needed.
       #
       # pom.xml pins the Testcontainers-shaded docker-java client's Remote API version
-      # (surefire api.version property) to work around its lack of negotiation. Its
+      # (surefire/failsafe api.version property) to work around its lack of negotiation. Its
       # default (1.51) suits a modern local Docker Engine but is rejected as "too new"
       # by an older Engine, so here we hand Maven the runner daemon's own reported max
       # via -Ddocker.api.version. The value is echoed first, unconditionally, so the
@@ -41,7 +43,7 @@ jobs:
         run: |
           DOCKER_API=$(docker version --format '{{.Server.APIVersion}}')
           echo "Runner Docker Server API version: ${DOCKER_API}"
-          mvn -B --no-transfer-progress -Ddocker.api.version="${DOCKER_API}" package
+          mvn -B --no-transfer-progress -Ddocker.api.version="${DOCKER_API}" verify
 
       - name: Upload plugin artifact
         if: success()
