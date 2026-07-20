@@ -17,7 +17,10 @@ class ArangoConfigTest {
                 .setSampleSize(1000)
                 .setSampleRandom(false)
                 .setMixedTypeStrategy(ArangoConfig.MixedTypeStrategy.VARCHAR)
-                .setTypeCoercion(ArangoConfig.TypeCoercion.LENIENT));
+                .setTypeCoercion(ArangoConfig.TypeCoercion.LENIENT)
+                .setShardsPerSplit(1)
+                .setMaxSplits(32)
+                .setShardParallelismEnabled(true));
     }
 
     @Test
@@ -30,6 +33,9 @@ class ArangoConfigTest {
                 .put("arangodb.schema.sample-random", "true")
                 .put("arangodb.schema.mixed-type-strategy", "json")
                 .put("arangodb.type-coercion", "STRICT")
+                .put("arangodb.shards-per-split", "4")
+                .put("arangodb.max-splits", "8")
+                .put("arangodb.shard-parallelism-enabled", "false")
                 .buildOrThrow();
 
         ArangoConfig expected = new ArangoConfig()
@@ -39,7 +45,10 @@ class ArangoConfigTest {
                 .setSampleSize(50)
                 .setSampleRandom(true)
                 .setMixedTypeStrategy(ArangoConfig.MixedTypeStrategy.JSON)
-                .setTypeCoercion(ArangoConfig.TypeCoercion.STRICT);
+                .setTypeCoercion(ArangoConfig.TypeCoercion.STRICT)
+                .setShardsPerSplit(4)
+                .setMaxSplits(8)
+                .setShardParallelismEnabled(false);
 
         ConfigAssertions.assertFullMapping(props, expected);
         // hosts parsed into list
