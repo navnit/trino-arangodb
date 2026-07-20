@@ -243,9 +243,11 @@ public class ArangoMetadata implements ConnectorMetadata {
         if (handle.limit().isPresent() && handle.limit().getAsLong() <= limit) {
             return Optional.empty();
         }
-        // M2 is single-split always (ArangoSplitManager emits exactly one ArangoSplit per
-        // table), so a pushed AQL LIMIT is always exactly satisfied: limitGuaranteed=true.
-        return Optional.of(new LimitApplicationResult<>(handle.withLimit(limit), true, false));
+        // Exact only for a single-split scan. With shard-parallelism enabled the table may fan out
+        // (ArangoSplitManager), and each split applies LIMIT n independently (total <= n * splits), so
+        // Trino must apply the final LIMIT -> report false. Disabled => always one split => exact => true.
+        boolean limitGuaranteed = !config.isShardParallelismEnabled();
+        return Optional.of(new LimitApplicationResult<>(handle.withLimit(limit), limitGuaranteed, false));
     }
 
     @Override

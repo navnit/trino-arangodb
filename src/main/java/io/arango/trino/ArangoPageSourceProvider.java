@@ -4,6 +4,7 @@ import io.arango.trino.aql.AqlBuilder;
 import io.arango.trino.aql.AqlBuilder.AqlQuery;
 import io.arango.trino.client.ArangoClient;
 import io.arango.trino.handle.ArangoColumnHandle;
+import io.arango.trino.handle.ArangoSplit;
 import io.arango.trino.handle.ArangoTableHandle;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.*;
@@ -37,12 +38,14 @@ public class ArangoPageSourceProvider implements ConnectorPageSourceProvider {
             List<ColumnHandle> columns,
             DynamicFilter dynamicFilter) {
         ArangoTableHandle handle = (ArangoTableHandle) table;
+        ArangoSplit arangoSplit = (ArangoSplit) split;
         List<ArangoColumnHandle> cols = columns.stream()
                 .map(ArangoColumnHandle.class::cast).toList();
         cols.forEach(ArangoPageSourceProvider::checkMaterializable);
         AqlQuery q = aqlBuilder.buildScan(handle, cols);
         return new ArangoPageSource(
-                client.query(handle.schema(), q.aql(), q.bindVars()), cols, config.getTypeCoercion());
+                client.query(handle.schema(), q.aql(), q.bindVars(), arangoSplit.shardIds()),
+                cols, config.getTypeCoercion());
     }
 
     // Fail fast and loud, before the query even runs, rather than silently emitting NULL for

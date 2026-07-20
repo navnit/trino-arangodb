@@ -3,6 +3,7 @@ package io.arango.trino;
 import io.arango.trino.aql.AqlBuilder;
 import io.arango.trino.client.ArangoClient;
 import io.arango.trino.handle.ArangoColumnHandle;
+import io.arango.trino.handle.ArangoSplit;
 import io.arango.trino.handle.ArangoTableHandle;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
@@ -90,7 +91,7 @@ class ArangoPageSourceProviderTest {
                 new ArangoColumnHandle("active", BOOLEAN, false, List.of("active")));
 
         ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder(), new ArangoConfig());
-        ConnectorPageSource source = provider.createPageSource(null, null, null, handle, columns, null);
+        ConnectorPageSource source = provider.createPageSource(null, null, new ArangoSplit(List.of()), handle, columns, null);
 
         Map<String, Object[]> rowsByKey = new HashMap<>();
         while (!source.isFinished()) {
@@ -147,7 +148,7 @@ class ArangoPageSourceProviderTest {
                 new ArangoColumnHandle("weight", BIGINT, false, List.of("weight")));
 
         ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder(), new ArangoConfig());
-        ConnectorPageSource source = provider.createPageSource(null, null, null, handle, columns, null);
+        ConnectorPageSource source = provider.createPageSource(null, null, new ArangoSplit(List.of()), handle, columns, null);
 
         int totalRows = 0;
         while (!source.isFinished()) {
@@ -184,7 +185,7 @@ class ArangoPageSourceProviderTest {
 
         ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder(), new ArangoConfig());
 
-        assertThatThrownBy(() -> provider.createPageSource(null, null, null, handle, columns, null))
+        assertThatThrownBy(() -> provider.createPageSource(null, null, new ArangoSplit(List.of()), handle, columns, null))
                 .isInstanceOfSatisfying(TrinoException.class,
                         e -> assertThat(e.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()));
     }
@@ -197,7 +198,7 @@ class ArangoPageSourceProviderTest {
 
         ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder(), new ArangoConfig());
 
-        assertThatThrownBy(() -> provider.createPageSource(null, null, null, handle, columns, null))
+        assertThatThrownBy(() -> provider.createPageSource(null, null, new ArangoSplit(List.of()), handle, columns, null))
                 .isInstanceOfSatisfying(TrinoException.class,
                         e -> assertThat(e.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()));
     }
@@ -210,7 +211,7 @@ class ArangoPageSourceProviderTest {
 
         ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder(), new ArangoConfig());
 
-        assertThatThrownBy(() -> provider.createPageSource(null, null, null, handle, columns, null))
+        assertThatThrownBy(() -> provider.createPageSource(null, null, new ArangoSplit(List.of()), handle, columns, null))
                 .isInstanceOfSatisfying(TrinoException.class,
                         e -> assertThat(e.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()));
     }
@@ -227,7 +228,7 @@ class ArangoPageSourceProviderTest {
         List<ColumnHandle> columns = List.of(new ArangoColumnHandle("name", VARCHAR, false, List.of("name")));
 
         ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder(), new ArangoConfig());
-        ConnectorPageSource source = provider.createPageSource(null, null, null, handle, columns, null);
+        ConnectorPageSource source = provider.createPageSource(null, null, new ArangoSplit(List.of()), handle, columns, null);
 
         int rows = 0;
         while (!source.isFinished()) {
@@ -272,7 +273,7 @@ class ArangoPageSourceProviderTest {
     private Object readSingleColumn(String collection, ArangoColumnHandle col, ArangoConfig config) throws Exception {
         ArangoTableHandle handle = new ArangoTableHandle("shop", collection, false, TupleDomain.all(), OptionalLong.empty());
         ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder(), config);
-        ConnectorPageSource source = provider.createPageSource(null, null, null, handle, List.of(col), null);
+        ConnectorPageSource source = provider.createPageSource(null, null, new ArangoSplit(List.of()), handle, List.of(col), null);
         Object result = null;
         try {
             while (!source.isFinished()) {
