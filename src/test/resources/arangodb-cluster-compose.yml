@@ -1,0 +1,41 @@
+services:
+  agency:
+    image: arangodb/arangodb:3.12
+    environment:
+      ARANGO_NO_AUTH: "1"
+    command: >
+      arangod --server.authentication=false
+      --server.endpoint=tcp://0.0.0.0:8531
+      --agency.my-address=tcp://agency:8531 --agency.endpoint=tcp://agency:8531
+      --agency.activate=true --agency.size=1 --agency.supervision=true
+  dbserver1:
+    image: arangodb/arangodb:3.12
+    environment:
+      ARANGO_NO_AUTH: "1"
+    command: >
+      arangod --server.authentication=false
+      --server.endpoint=tcp://0.0.0.0:8530
+      --cluster.my-address=tcp://dbserver1:8530 --cluster.my-role=PRIMARY
+      --cluster.agency-endpoint=tcp://agency:8531
+    depends_on: [agency]
+  dbserver2:
+    image: arangodb/arangodb:3.12
+    environment:
+      ARANGO_NO_AUTH: "1"
+    command: >
+      arangod --server.authentication=false
+      --server.endpoint=tcp://0.0.0.0:8530
+      --cluster.my-address=tcp://dbserver2:8530 --cluster.my-role=PRIMARY
+      --cluster.agency-endpoint=tcp://agency:8531
+    depends_on: [agency]
+  coordinator:
+    image: arangodb/arangodb:3.12
+    environment:
+      ARANGO_NO_AUTH: "1"
+    command: >
+      arangod --server.authentication=false
+      --server.endpoint=tcp://0.0.0.0:8529
+      --cluster.my-address=tcp://coordinator:8529 --cluster.my-role=COORDINATOR
+      --cluster.agency-endpoint=tcp://agency:8531
+    ports: ["8529"]
+    depends_on: [agency, dbserver1, dbserver2]

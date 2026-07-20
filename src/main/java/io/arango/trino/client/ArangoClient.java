@@ -127,6 +127,12 @@ public class ArangoClient implements AutoCloseable {
                     new CollectionCreateOptions().type(CollectionType.EDGES));
         }
     }
+    public void createShardedCollectionForTest(String db, String name, int numberOfShards) {
+        if (!arango.db(db).collection(name).exists()) {
+            arango.db(db).createCollection(name,
+                    new CollectionCreateOptions().numberOfShards(numberOfShards));
+        }
+    }
     public void insertForTest(String db, String name, Map<String, Object> doc) {
         arango.db(db).collection(name).insertDocument(doc);
     }
