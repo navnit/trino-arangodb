@@ -24,7 +24,9 @@ import io.trino.spi.expression.ConnectorExpression;
 import io.trino.spi.expression.FieldDereference;
 import io.trino.spi.expression.Variable;
 import io.trino.spi.predicate.Domain;
+import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.predicate.ValueSet;
 import io.trino.spi.type.RowType;
 import org.junit.jupiter.api.Test;
 
@@ -87,7 +89,7 @@ class ArangoMetadataTest {
     // removed, this would NPE on the null client instead of throwing TrinoException.
     @Test
     void getTableHandleRejectsVersionedTableRequests() {
-        ArangoMetadata metadata = new ArangoMetadata(null, null);
+        ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ConnectorTableVersion version = new ConnectorTableVersion(PointerType.TEMPORAL, BIGINT, 1L);
 
         assertThatThrownBy(() -> metadata.getTableHandle(
@@ -122,7 +124,7 @@ class ArangoMetadataTest {
 
     @Test
     void getTableHandleTranslatesArangoDBExceptionToNull() {
-        ArangoMetadata metadata = new ArangoMetadata(new ThrowingArangoClient(), null);
+        ArangoMetadata metadata = new ArangoMetadata(new ThrowingArangoClient(), null, new ArangoConfig());
 
         ArangoTableHandle handle = metadata.getTableHandle(
                 null, new SchemaTableName("nosuchdb", "sometable"), Optional.empty(), Optional.empty());
@@ -150,7 +152,7 @@ class ArangoMetadataTest {
 
     @Test
     void getTableHandlePropagatesNonNotFoundArangoDBExceptionAsTrinoException() {
-        ArangoMetadata metadata = new ArangoMetadata(new AuthFailingArangoClient(), null);
+        ArangoMetadata metadata = new ArangoMetadata(new AuthFailingArangoClient(), null, new ArangoConfig());
 
         assertThatThrownBy(() -> metadata.getTableHandle(
                 null, new SchemaTableName("shop", "sometable"), Optional.empty(), Optional.empty()))
@@ -194,7 +196,7 @@ class ArangoMetadataTest {
     @Test
     void listTablesSkipsNotFoundSchemaButKeepsOthers() {
         ArangoMetadata metadata = new ArangoMetadata(
-                new PerSchemaThrowingArangoClient("gone", "ok-does-not-fail"), null);
+                new PerSchemaThrowingArangoClient("gone", "ok-does-not-fail"), null, new ArangoConfig());
 
         List<SchemaTableName> tables = metadata.listTables(null, Optional.of("gone"));
 
@@ -204,7 +206,7 @@ class ArangoMetadataTest {
     @Test
     void listTablesPropagatesNonNotFoundArangoDBExceptionAsTrinoException() {
         ArangoMetadata metadata = new ArangoMetadata(
-                new PerSchemaThrowingArangoClient("gone", "unauthorized-db"), null);
+                new PerSchemaThrowingArangoClient("gone", "unauthorized-db"), null, new ArangoConfig());
 
         assertThatThrownBy(() -> metadata.listTables(null, Optional.of("unauthorized-db")))
                 .isInstanceOfSatisfying(TrinoException.class,
@@ -227,7 +229,7 @@ class ArangoMetadataTest {
                         }
                         return List.of(new CollectionInfo("widgets", false, false));
                     }
-                }, null);
+                }, null, new ArangoConfig());
 
         List<SchemaTableName> tables = metadata.listTables(null, Optional.empty());
 
@@ -260,7 +262,7 @@ class ArangoMetadataTest {
     void columnCacheMemoizesSchemaResolutionPerTable() {
         CountingSchemaResolver resolver = new CountingSchemaResolver(
                 List.of(new ArangoColumn("name", VARCHAR, false)));
-        ArangoMetadata metadata = new ArangoMetadata(null, resolver);
+        ArangoMetadata metadata = new ArangoMetadata(null, resolver, new ArangoConfig());
         ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
 
         ConnectorTableMetadata tableMetadata = metadata.getTableMetadata(null, handle);
@@ -273,9 +275,9 @@ class ArangoMetadataTest {
 
     @Test
     void applyFilterPushesBooleanEqualityAndDropsFromResidual() {
-        // BOOLEAN equality is the one predicate still pushed down (only coercion-safe case; see
-        // ArangoMetadata.isPushable). It moves onto the handle constraint and leaves no residual.
-        ArangoMetadata metadata = new ArangoMetadata(null, null);
+        // Equality/IN pushes for BOOLEAN/VARCHAR/BIGINT/DOUBLE (see ArangoMetadata.isPushable).
+        // BOOLEAN moves onto the handle constraint and leaves no residual.
+        ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
         ArangoColumnHandle active = new ArangoColumnHandle("active", BOOLEAN, false, List.of("active"));
         Constraint constraint = new Constraint(TupleDomain.withColumnDomains(
@@ -290,26 +292,73 @@ class ArangoMetadataTest {
     }
 
     @Test
-    void applyFilterKeepsBigintEqualityInResidual() {
-        // Regression lock for the M2 final-review fix: BIGINT (and VARCHAR/DOUBLE) equality is no
-        // longer pushed, because AQL's type-strict `==` can disagree with ArangoPageSource
-        // .appendValue's lenient Number->long coercion for an out-of-sample stored value. With
-        // nothing pushable, applyFilter has no new constraint to add and returns empty (Trino keeps
-        // the whole predicate in its residual filter).
-        ArangoMetadata metadata = new ArangoMetadata(null, null);
+    void applyFilterPushesBigintEquality() {
+        ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
         ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, List.of("age"));
         Constraint constraint = new Constraint(TupleDomain.withColumnDomains(
                 Map.of(age, Domain.singleValue(BIGINT, 30L))));
+        Optional<ConstraintApplicationResult<ConnectorTableHandle>> result =
+                metadata.applyFilter(null, handle, constraint);
+        assertThat(result).isPresent();
+        ArangoTableHandle newHandle = (ArangoTableHandle) result.orElseThrow().getHandle();
+        assertThat(newHandle.constraint().getDomains().orElseThrow())
+                .containsEntry(age, Domain.singleValue(BIGINT, 30L));
+    }
 
+    @Test
+    void applyFilterPushesVarcharEquality() {
+        ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
+        ArangoColumnHandle name = new ArangoColumnHandle("name", VARCHAR, false, List.of("name"));
+        Constraint constraint = new Constraint(TupleDomain.withColumnDomains(
+                Map.of(name, Domain.singleValue(VARCHAR, io.airlift.slice.Slices.utf8Slice("x")))));
+        Optional<ConstraintApplicationResult<ConnectorTableHandle>> result =
+                metadata.applyFilter(null, handle, constraint);
+        assertThat(result).isPresent();
+    }
+
+    @Test
+    void applyFilterPushesBigintRangeAsPrefilterKeepingResidual() {
+        ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
+        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, List.of("age"));
+        Domain range = Domain.create(ValueSet.ofRanges(Range.greaterThan(BIGINT, 30L)), false);
+        Constraint constraint = new Constraint(TupleDomain.withColumnDomains(Map.of(age, range)));
         Optional<ConstraintApplicationResult<ConnectorTableHandle>> result = metadata.applyFilter(null, handle, constraint);
+        assertThat(result).isPresent();
+        // Pushed onto the handle (-> AQL prefilter) AND kept in the remaining filter (-> Trino re-check).
+        ArangoTableHandle newHandle = (ArangoTableHandle) result.orElseThrow().getHandle();
+        assertThat(newHandle.constraint().getDomains().orElseThrow()).containsEntry(age, range);
+        assertThat(result.orElseThrow().getRemainingFilter().getDomains().orElseThrow()).containsEntry(age, range);
+    }
 
-        assertThat(result).isEmpty();
+    @Test
+    void applyFilterPushesDoubleRangeFullyEnforced() {
+        ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "prices", false, TupleDomain.all(), OptionalLong.empty());
+        ArangoColumnHandle amount = new ArangoColumnHandle("amount", DOUBLE, false, List.of("amount"));
+        Domain range = Domain.create(ValueSet.ofRanges(Range.greaterThan(DOUBLE, 9.99)), false);
+        Constraint constraint = new Constraint(TupleDomain.withColumnDomains(Map.of(amount, range)));
+        Optional<ConstraintApplicationResult<ConnectorTableHandle>> result = metadata.applyFilter(null, handle, constraint);
+        assertThat(result).isPresent();
+        assertThat(result.orElseThrow().getRemainingFilter().isAll()).isTrue(); // fully enforced, no residual
+    }
+
+    @Test
+    void applyFilterPushesNothingInStrictMode() {
+        ArangoMetadata strict = new ArangoMetadata(null, null,
+                new ArangoConfig().setTypeCoercion(ArangoConfig.TypeCoercion.STRICT));
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
+        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, List.of("age"));
+        Constraint constraint = new Constraint(TupleDomain.withColumnDomains(
+                Map.of(age, Domain.singleValue(BIGINT, 30L))));
+        assertThat(strict.applyFilter(null, handle, constraint)).isEmpty();
     }
 
     @Test
     void applyFilterKeepsNullableRestrictedDomainInResidual() {
-        ArangoMetadata metadata = new ArangoMetadata(null, null);
+        ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
         ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, List.of("age"));
         Domain nullableRestricted = Domain.create(io.trino.spi.predicate.ValueSet.of(BIGINT, 30L), true);
@@ -326,7 +375,7 @@ class ArangoMetadataTest {
         // coerces type-mismatched values to Trino NULL. A value outside SchemaResolver's sample
         // (or one the inferred type doesn't fit) would answer this predicate differently in AQL
         // than in Trino, so IS NULL must stay residual rather than being pushed.
-        ArangoMetadata metadata = new ArangoMetadata(null, null);
+        ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
         ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, List.of("age"));
         Constraint constraint = new Constraint(TupleDomain.withColumnDomains(
@@ -339,7 +388,7 @@ class ArangoMetadataTest {
 
     @Test
     void applyFilterKeepsIsNotNullInResidual() {
-        ArangoMetadata metadata = new ArangoMetadata(null, null);
+        ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
         ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, List.of("age"));
         Constraint constraint = new Constraint(TupleDomain.withColumnDomains(
@@ -354,8 +403,8 @@ class ArangoMetadataTest {
     void applyFilterReturnsEmptyWhenNothingNewToPush() {
         // Fixed-point guard: the pushable BOOLEAN domain is already on the handle, so re-invoking
         // applyFilter with the same constraint adds nothing new and returns empty (prevents an
-        // infinite applyFilter loop). Uses BOOLEAN because that is the only type still pushed.
-        ArangoMetadata metadata = new ArangoMetadata(null, null);
+        // infinite applyFilter loop). Uses BOOLEAN as a representative pushable type.
+        ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ArangoColumnHandle active = new ArangoColumnHandle("active", BOOLEAN, false, List.of("active"));
         TupleDomain<ColumnHandle> alreadyPushed = TupleDomain.withColumnDomains(
                 Map.of(active, Domain.singleValue(BOOLEAN, true)));
@@ -369,7 +418,7 @@ class ArangoMetadataTest {
 
     @Test
     void applyLimitPushesAndGuaranteesLimit() {
-        ArangoMetadata metadata = new ArangoMetadata(null, null);
+        ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
 
         Optional<LimitApplicationResult<ConnectorTableHandle>> result = metadata.applyLimit(null, handle, 10L);
@@ -382,7 +431,7 @@ class ArangoMetadataTest {
 
     @Test
     void applyLimitDeclinesWhenExistingLimitIsAlreadySmaller() {
-        ArangoMetadata metadata = new ArangoMetadata(null, null);
+        ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.of(5L));
 
         Optional<LimitApplicationResult<ConnectorTableHandle>> result = metadata.applyLimit(null, handle, 10L);
@@ -392,7 +441,7 @@ class ArangoMetadataTest {
 
     @Test
     void applyLimitPushesTighterLimitOverExistingLooserOne() {
-        ArangoMetadata metadata = new ArangoMetadata(null, null);
+        ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.of(10L));
 
         Optional<LimitApplicationResult<ConnectorTableHandle>> result = metadata.applyLimit(null, handle, 5L);
@@ -405,7 +454,7 @@ class ArangoMetadataTest {
 
     @Test
     void applyLimitDeclinesWhenExistingLimitEqualsRequestedLimit() {
-        ArangoMetadata metadata = new ArangoMetadata(null, null);
+        ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.of(10L));
 
         Optional<LimitApplicationResult<ConnectorTableHandle>> result = metadata.applyLimit(null, handle, 10L);
@@ -415,7 +464,7 @@ class ArangoMetadataTest {
 
     @Test
     void applyProjectionPushesNestedFieldDereference() {
-        ArangoMetadata metadata = new ArangoMetadata(null, null);
+        ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
         RowType addressType = RowType.rowType(
                 RowType.field("city", VARCHAR),
@@ -441,7 +490,7 @@ class ArangoMetadataTest {
 
     @Test
     void applyProjectionDeclinesDereferenceIntoNonRowType() {
-        ArangoMetadata metadata = new ArangoMetadata(null, null);
+        ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
         ArangoColumnHandle ageColumn = new ArangoColumnHandle("age", BIGINT, false, List.of("age"));
         // FieldDereference's constructor requires its target's declared type to already be a
@@ -461,7 +510,7 @@ class ArangoMetadataTest {
 
     @Test
     void applyProjectionDeclinesPureVariablePassthrough() {
-        ArangoMetadata metadata = new ArangoMetadata(null, null);
+        ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
         ArangoColumnHandle nameColumn = new ArangoColumnHandle("name", VARCHAR, false, List.of("name"));
         Variable nameVar = new Variable("name_0", VARCHAR);
@@ -475,7 +524,7 @@ class ArangoMetadataTest {
 
     @Test
     void applyProjectionDeclinesOnSyntheticNameCollisionWithRealColumn() {
-        ArangoMetadata metadata = new ArangoMetadata(null, null);
+        ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
         RowType addressType = RowType.rowType(RowType.field("city", VARCHAR));
         ArangoColumnHandle addressColumn = new ArangoColumnHandle("address", addressType, false, List.of("address"));
@@ -498,7 +547,7 @@ class ArangoMetadataTest {
 
     @Test
     void applyProjectionDeclinesWhenRootVariableIsUnresolvable() {
-        ArangoMetadata metadata = new ArangoMetadata(null, null);
+        ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
         RowType addressType = RowType.rowType(RowType.field("city", VARCHAR));
         Variable unknownVar = new Variable("ghost_0", addressType);
@@ -513,7 +562,7 @@ class ArangoMetadataTest {
 
     @Test
     void applyProjectionMergesTwoDereferenceChainsToTheSameNestedColumn() {
-        ArangoMetadata metadata = new ArangoMetadata(null, null);
+        ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
         RowType addressType = RowType.rowType(RowType.field("city", VARCHAR));
         ArangoColumnHandle addressColumn = new ArangoColumnHandle("address", addressType, false, List.of("address"));
@@ -541,7 +590,7 @@ class ArangoMetadataTest {
 
     @Test
     void applyProjectionDeclinesWhenDereferenceLeafIsStructuredType() {
-        ArangoMetadata metadata = new ArangoMetadata(null, null);
+        ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
         RowType geoType = RowType.rowType(RowType.field("lat", DOUBLE), RowType.field("lng", DOUBLE));
         RowType addressType = RowType.rowType(RowType.field("geo", geoType), RowType.field("city", VARCHAR));

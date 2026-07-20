@@ -12,6 +12,7 @@ import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.RowType;
+import io.trino.spi.type.VarcharType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -88,7 +89,7 @@ class ArangoPageSourceProviderTest {
                 new ArangoColumnHandle("price", DOUBLE, false, List.of("price")),
                 new ArangoColumnHandle("active", BOOLEAN, false, List.of("active")));
 
-        ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder());
+        ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder(), new ArangoConfig());
         ConnectorPageSource source = provider.createPageSource(null, null, null, handle, columns, null);
 
         Map<String, Object[]> rowsByKey = new HashMap<>();
@@ -145,7 +146,7 @@ class ArangoPageSourceProviderTest {
                 new ArangoColumnHandle("_to", VARCHAR, false, List.of("_to")),
                 new ArangoColumnHandle("weight", BIGINT, false, List.of("weight")));
 
-        ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder());
+        ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder(), new ArangoConfig());
         ConnectorPageSource source = provider.createPageSource(null, null, null, handle, columns, null);
 
         int totalRows = 0;
@@ -181,7 +182,7 @@ class ArangoPageSourceProviderTest {
                 new ArangoColumnHandle("name", VARCHAR, false, List.of("name")),
                 new ArangoColumnHandle("tags", new ArrayType(VARCHAR), false, List.of("tags")));
 
-        ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder());
+        ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder(), new ArangoConfig());
 
         assertThatThrownBy(() -> provider.createPageSource(null, null, null, handle, columns, null))
                 .isInstanceOfSatisfying(TrinoException.class,
@@ -194,7 +195,7 @@ class ArangoPageSourceProviderTest {
         List<ColumnHandle> columns = List.of(
                 new ArangoColumnHandle("address", RowType.rowType(RowType.field("city", VARCHAR)), false, List.of("address")));
 
-        ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder());
+        ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder(), new ArangoConfig());
 
         assertThatThrownBy(() -> provider.createPageSource(null, null, null, handle, columns, null))
                 .isInstanceOfSatisfying(TrinoException.class,
@@ -207,7 +208,7 @@ class ArangoPageSourceProviderTest {
         List<ColumnHandle> columns = List.of(
                 new ArangoColumnHandle("bigNumber", DecimalType.createDecimalType(38, 0), false, List.of("bigNumber")));
 
-        ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder());
+        ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder(), new ArangoConfig());
 
         assertThatThrownBy(() -> provider.createPageSource(null, null, null, handle, columns, null))
                 .isInstanceOfSatisfying(TrinoException.class,
@@ -225,7 +226,7 @@ class ArangoPageSourceProviderTest {
         ArangoTableHandle handle = new ArangoTableHandle("shop", "items", false, TupleDomain.all(), OptionalLong.empty());
         List<ColumnHandle> columns = List.of(new ArangoColumnHandle("name", VARCHAR, false, List.of("name")));
 
-        ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder());
+        ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder(), new ArangoConfig());
         ConnectorPageSource source = provider.createPageSource(null, null, null, handle, columns, null);
 
         int rows = 0;
@@ -238,6 +239,58 @@ class ArangoPageSourceProviderTest {
         }
         assertThat(rows).isEqualTo(3);
         source.close();
+    }
+
+    @Test
+    void numberInVarcharColumnReadsAsNullUnderLenient() throws Exception {
+        client.createDocumentCollectionForTest("shop", "coercion");
+        client.insertForTest("shop", "coercion", mapOf("_key", "c-num", "s", 42L));
+        assertThat(readSingleColumn("coercion",
+                new ArangoColumnHandle("s", VARCHAR, false, List.of("s")), new ArangoConfig())).isNull();
+    }
+
+    @Test
+    void fractionalNumberInBigintColumnReadsAsNullUnderLenient() throws Exception {
+        client.createDocumentCollectionForTest("shop", "coercion2");
+        client.insertForTest("shop", "coercion2", mapOf("_key", "c-frac", "n", 42.5));
+        assertThat(readSingleColumn("coercion2",
+                new ArangoColumnHandle("n", BIGINT, false, List.of("n")), new ArangoConfig())).isNull();
+    }
+
+    @Test
+    void strictModeRaisesOnTypeMismatch() {
+        client.createDocumentCollectionForTest("shop", "coercion3");
+        client.insertForTest("shop", "coercion3", mapOf("_key", "c-bad", "s", 42L));
+        assertThatThrownBy(() -> readSingleColumn("coercion3",
+                new ArangoColumnHandle("s", VARCHAR, false, List.of("s")),
+                new ArangoConfig().setTypeCoercion(ArangoConfig.TypeCoercion.STRICT)))
+                .isInstanceOfSatisfying(io.trino.spi.TrinoException.class,
+                        e -> assertThat(e.getErrorCode().getName()).isEqualTo("ARANGODB_TYPE_CONVERSION_ERROR"));
+    }
+
+    // Reads the single column `col` from a single-document collection, returning its one cell (or null).
+    private Object readSingleColumn(String collection, ArangoColumnHandle col, ArangoConfig config) throws Exception {
+        ArangoTableHandle handle = new ArangoTableHandle("shop", collection, false, TupleDomain.all(), OptionalLong.empty());
+        ArangoPageSourceProvider provider = new ArangoPageSourceProvider(client, new AqlBuilder(), config);
+        ConnectorPageSource source = provider.createPageSource(null, null, null, handle, List.of(col), null);
+        Object result = null;
+        try {
+            while (!source.isFinished()) {
+                SourcePage page = source.getNextSourcePage();
+                if (page == null) {
+                    continue;
+                }
+                for (int pos = 0; pos < page.getPositionCount(); pos++) {
+                    result = page.getBlock(0).isNull(pos) ? null
+                            : (col.type() instanceof VarcharType
+                                ? VARCHAR.getSlice(page.getBlock(0), pos).toStringUtf8()
+                                : BIGINT.getLong(page.getBlock(0), pos));
+                }
+            }
+        } finally {
+            source.close();
+        }
+        return result;
     }
 
     private static Map<String, Object> mapOf(Object... kv) {

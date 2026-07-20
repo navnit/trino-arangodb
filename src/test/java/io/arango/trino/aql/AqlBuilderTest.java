@@ -6,7 +6,9 @@ import io.arango.trino.handle.ArangoColumnHandle;
 import io.arango.trino.handle.ArangoTableHandle;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.predicate.Domain;
+import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.predicate.ValueSet;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -16,6 +18,7 @@ import java.util.OptionalLong;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
+import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -71,12 +74,86 @@ class AqlBuilderTest {
         assertThat(q.bindVars()).containsEntry("v0", List.of(30L, 40L));
     }
 
-    // No range-filter tests: after the M2 final-review narrowing, ArangoMetadata.isPushable never
-    // classifies a range domain (of any type) as pushable, so renderDomain's range-rendering code
-    // was removed as dead. Likewise no rendersIsNullFilter/rendersIsNotNullFilter tests: IS NULL /
-    // IS NOT NULL are never pushed either -- there is no reachable input shape for renderDomain to
-    // render those ways. The equality/IN discrete-set rendering below stays reachable (BOOLEAN
-    // equality/IN is the one predicate still pushed) and is exercised generically here.
+    @Test
+    void bigintRangeRendersWithNumberGuardOnly() {
+        // BIGINT range uses a bare IS_NUMBER guard -- NO `== FLOOR(...)` integrality conjunct. AQL FLOOR()
+        // returns a double, so `d.f == FLOOR(d.f)` would false-miss a stored int64 > 2^53 (review finding
+        // C3). It is unnecessary anyway: BIGINT range is prefilter-only, so admitting fractional/out-of-range
+        // values (which read back NULL) is safe -- Trino's residual re-check drops them.
+        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, List.of("age"));
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false,
+                TupleDomain.withColumnDomains(Map.of(age,
+                        Domain.create(ValueSet.ofRanges(Range.greaterThan(BIGINT, 30L)), false))),
+                OptionalLong.empty());
+        AqlQuery q = new AqlBuilder().buildScan(handle, List.of(age));
+        assertThat(q.aql()).isEqualTo(
+                "FOR d IN @@col FILTER (IS_NUMBER(d[\"age\"]) AND d[\"age\"] > @v0) "
+                        + "RETURN {\"age\": d[\"age\"]}");
+        assertThat(q.bindVars()).containsEntry("v0", 30L);
+    }
+
+    @Test
+    void doubleRangeRendersWithNumberGuardAndDoublePromotion() {
+        // A DOUBLE range promotes the operand into double space with `+ 0.0` so AQL compares exactly
+        // what appendValue's n.doubleValue() emits (a bare comparison diverges for a stored int64 > 2^53
+        // -- review finding C1); the IS_NUMBER guard precedes it because `+ 0.0` coerces non-numbers.
+        ArangoColumnHandle price = new ArangoColumnHandle("price", DOUBLE, false, List.of("price"));
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "items", false,
+                TupleDomain.withColumnDomains(Map.of(price,
+                        Domain.create(ValueSet.ofRanges(Range.lessThanOrEqual(DOUBLE, 9.99)), false))),
+                OptionalLong.empty());
+        AqlQuery q = new AqlBuilder().buildScan(handle, List.of(price));
+        assertThat(q.aql()).isEqualTo(
+                "FOR d IN @@col FILTER (IS_NUMBER(d[\"price\"]) AND (d[\"price\"] + 0.0) <= @v0) "
+                        + "RETURN {\"price\": d[\"price\"]}");
+        assertThat(q.bindVars()).containsEntry("v0", 9.99);
+    }
+
+    @Test
+    void doubleEqualityRendersWithNumberGuardAndDoublePromotion() {
+        // DOUBLE equality/IN also promotes and guards (unlike BOOLEAN/VARCHAR/BIGINT equality, which is
+        // type-exact in AQL and stays bare) -- otherwise a stored int64 > 2^53 would match a bind it
+        // does not equal after rounding on read.
+        ArangoColumnHandle price = new ArangoColumnHandle("price", DOUBLE, false, List.of("price"));
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "items", false,
+                TupleDomain.withColumnDomains(Map.of(price,
+                        Domain.create(ValueSet.of(DOUBLE, 20.0), false))),
+                OptionalLong.empty());
+        AqlQuery q = new AqlBuilder().buildScan(handle, List.of(price));
+        assertThat(q.aql()).isEqualTo(
+                "FOR d IN @@col FILTER (IS_NUMBER(d[\"price\"]) AND (d[\"price\"] + 0.0) == @v0) "
+                        + "RETURN {\"price\": d[\"price\"]}");
+        assertThat(q.bindVars()).containsEntry("v0", 20.0);
+    }
+
+    @Test
+    void bigintBoundedRangeRendersBothBoundsWithNumberGuard() {
+        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, List.of("age"));
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false,
+                TupleDomain.withColumnDomains(Map.of(age,
+                        Domain.create(ValueSet.ofRanges(Range.range(BIGINT, 10L, true, 20L, false)), false))),
+                OptionalLong.empty());
+        AqlQuery q = new AqlBuilder().buildScan(handle, List.of(age));
+        assertThat(q.aql()).isEqualTo(
+                "FOR d IN @@col FILTER (IS_NUMBER(d[\"age\"]) "
+                        + "AND (d[\"age\"] >= @v0 AND d[\"age\"] < @v1)) RETURN {\"age\": d[\"age\"]}");
+        assertThat(q.bindVars()).containsEntry("v0", 10L).containsEntry("v1", 20L);
+    }
+
+    @Test
+    void bigintMultiRangeRendersOrJoinedClausesInsideNumberGuard() {
+        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, List.of("age"));
+        ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false,
+                TupleDomain.withColumnDomains(Map.of(age,
+                        Domain.create(ValueSet.ofRanges(
+                                Range.lessThan(BIGINT, 10L), Range.greaterThan(BIGINT, 20L)), false))),
+                OptionalLong.empty());
+        AqlQuery q = new AqlBuilder().buildScan(handle, List.of(age));
+        assertThat(q.aql()).isEqualTo(
+                "FOR d IN @@col FILTER (IS_NUMBER(d[\"age\"]) "
+                        + "AND (d[\"age\"] < @v0 OR d[\"age\"] > @v1)) RETURN {\"age\": d[\"age\"]}");
+        assertThat(q.bindVars()).containsEntry("v0", 10L).containsEntry("v1", 20L);
+    }
 
     @Test
     void rendersVarcharEqualityByConvertingSliceToString() {

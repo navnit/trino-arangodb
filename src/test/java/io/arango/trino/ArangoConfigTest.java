@@ -16,7 +16,8 @@ class ArangoConfigTest {
                 .setPassword("")
                 .setSampleSize(1000)
                 .setSampleRandom(false)
-                .setMixedTypeStrategy(ArangoConfig.MixedTypeStrategy.VARCHAR));
+                .setMixedTypeStrategy(ArangoConfig.MixedTypeStrategy.VARCHAR)
+                .setTypeCoercion(ArangoConfig.TypeCoercion.LENIENT));
     }
 
     @Test
@@ -28,6 +29,7 @@ class ArangoConfigTest {
                 .put("arangodb.schema.sample-size", "50")
                 .put("arangodb.schema.sample-random", "true")
                 .put("arangodb.schema.mixed-type-strategy", "json")
+                .put("arangodb.type-coercion", "STRICT")
                 .buildOrThrow();
 
         ArangoConfig expected = new ArangoConfig()
@@ -36,7 +38,8 @@ class ArangoConfigTest {
                 .setPassword("secret")
                 .setSampleSize(50)
                 .setSampleRandom(true)
-                .setMixedTypeStrategy(ArangoConfig.MixedTypeStrategy.JSON);
+                .setMixedTypeStrategy(ArangoConfig.MixedTypeStrategy.JSON)
+                .setTypeCoercion(ArangoConfig.TypeCoercion.STRICT);
 
         ConfigAssertions.assertFullMapping(props, expected);
         // hosts parsed into list

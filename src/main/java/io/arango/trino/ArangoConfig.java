@@ -12,6 +12,7 @@ import java.util.List;
 
 public class ArangoConfig {
     public enum MixedTypeStrategy { VARCHAR, JSON }
+    public enum TypeCoercion { LENIENT, STRICT }
 
     private String hosts = "localhost:8529";
     private String user = "root";
@@ -19,6 +20,7 @@ public class ArangoConfig {
     private int sampleSize = 1000;
     private boolean sampleRandom = false;
     private MixedTypeStrategy mixedTypeStrategy = MixedTypeStrategy.VARCHAR;
+    private TypeCoercion typeCoercion = TypeCoercion.LENIENT;
 
     @NotNull
     public String getHosts() { return hosts; }
@@ -60,5 +62,14 @@ public class ArangoConfig {
     @Config("arangodb.schema.mixed-type-strategy")
     public ArangoConfig setMixedTypeStrategy(MixedTypeStrategy mixedTypeStrategy) {
         this.mixedTypeStrategy = mixedTypeStrategy; return this;
+    }
+
+    @NotNull
+    public TypeCoercion getTypeCoercion() { return typeCoercion; }
+
+    @Config("arangodb.type-coercion")
+    @ConfigDescription("Per-cell type-mismatch policy: LENIENT reads a mismatched value as NULL, STRICT raises an error")
+    public ArangoConfig setTypeCoercion(TypeCoercion typeCoercion) {
+        this.typeCoercion = typeCoercion; return this;
     }
 }
