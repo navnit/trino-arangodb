@@ -5,25 +5,30 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static io.airlift.json.JsonCodec.jsonCodec;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
-public class ArangoSplitTest {
+class ArangoSplitTest {
+    private static final JsonCodec<ArangoSplit> CODEC = jsonCodec(ArangoSplit.class);
+
     @Test
-    public void testJsonCodecRoundTrip() {
-        JsonCodec<ArangoSplit> codec = JsonCodec.jsonCodec(ArangoSplit.class);
+    void roundTripsWithShardIds() {
+        ArangoSplit split = new ArangoSplit(List.of("s100001", "s100002"));
+        assertEquals(split, CODEC.fromJson(CODEC.toJson(split)));
+    }
 
-        // Test with empty shard list
-        ArangoSplit original = new ArangoSplit(List.of());
-        String json = codec.toJson(original);
-        ArangoSplit decoded = codec.fromJson(json);
-        assertEquals(original, decoded);
-        assertEquals(List.of(), decoded.shardIds());
+    @Test
+    void roundTripsEmpty() {
+        ArangoSplit split = new ArangoSplit(List.of());
+        assertEquals(split, CODEC.fromJson(CODEC.toJson(split)));
+        assertTrue(split.shardIds().isEmpty());
+    }
 
-        // Test with multiple shards
-        ArangoSplit multiShard = new ArangoSplit(List.of("shard1", "shard2", "shard3"));
-        json = codec.toJson(multiShard);
-        decoded = codec.fromJson(json);
-        assertEquals(multiShard, decoded);
-        assertEquals(List.of("shard1", "shard2", "shard3"), decoded.shardIds());
+    @Test
+    void retainedSizeGrowsWithShards() {
+        long empty = new ArangoSplit(List.of()).getRetainedSizeInBytes();
+        long two = new ArangoSplit(List.of("s100001", "s100002")).getRetainedSizeInBytes();
+        assertTrue(two > empty, "retained size must include the shard-id list");
     }
 }
