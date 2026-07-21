@@ -12,6 +12,7 @@ import io.trino.spi.predicate.TupleDomain;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -23,6 +24,7 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+@ExtendWith(SharedArangoClusterExtension.class)
 class ShardParallelCorrectnessIT {
     private static TestingArangoCluster cluster;
     private static ArangoClient client;
@@ -32,7 +34,7 @@ class ShardParallelCorrectnessIT {
 
     @BeforeAll
     static void setup() {
-        cluster = new TestingArangoCluster();
+        cluster = SharedArangoClusterExtension.cluster();
         client = new ArangoClient(cluster.config());
         client.createDatabaseForTest(DB);
         client.createShardedCollectionForTest(DB, COLL, 3);
@@ -44,7 +46,9 @@ class ShardParallelCorrectnessIT {
     @AfterAll
     static void teardown() {
         if (client != null) client.close();
-        if (cluster != null) cluster.close();
+        // Do NOT close the shared cluster here: SharedArangoClusterExtension stops it once at
+        // the end of the test plan. Closing it per-class would force the other cluster IT to
+        // boot a second cluster, which the CI runner cannot stand up (the failure this fixes).
     }
 
     private static ArangoTableHandle handle() {
