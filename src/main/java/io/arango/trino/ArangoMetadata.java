@@ -186,7 +186,7 @@ public class ArangoMetadata implements ConnectorMetadata {
         return Optional.of(new ConstraintApplicationResult<>(newHandle, residual, constraint.getExpression(), false));
     }
 
-    // Widened M2 pushdown. The read path (ArangoPageSource.appendValue) is type-exact, so a pushed
+    // Widened M2 pushdown. The read path (ValueMaterializer) is type-exact, so a pushed
     // AQL predicate and Trino's residual re-check admit exactly the same values (the core invariant).
     // Equality/IN need no guard (AQL ==/IN are type-strict); numeric range is guarded in AqlBuilder.
     private boolean isPushable(Type type, Domain domain) {
@@ -220,16 +220,16 @@ public class ArangoMetadata implements ConnectorMetadata {
         return type.equals(BigintType.BIGINT) || type.equals(DoubleType.DOUBLE);
     }
 
-    // A pushable predicate whose AQL form admits a SUPERSET of what appendValue writes non-NULL, so
+    // A pushable predicate whose AQL form admits a SUPERSET of what ValueMaterializer writes non-NULL, so
     // it must ALSO stay in Trino's residual for a post-read re-check. Only BIGINT range qualifies: its
     // bare IS_NUMBER guard (AqlBuilder) admits fractional values and integral values outside signed-64-bit
-    // range, both of which appendValue reads as NULL -- the residual re-check drops them. We cannot tighten
+    // range, both of which ValueMaterializer reads as NULL -- the residual re-check drops them. We cannot tighten
     // the guard to integers-in-range: AQL FLOOR() returns a double and would false-miss a stored int64
     // > 2^53 (review finding C3). Everything else is fully enforced, never prefilter-only:
     //   - Equality/IN agrees for every type: ArangoDB compares by exact value and the BIGINT read path
     //     is exact (longValue(), no rounding); DOUBLE eq/IN promotes its operand with `+ 0.0`.
     //   - DOUBLE range agrees because AqlBuilder promotes the DOUBLE operand into double space with
-    //     `+ 0.0`, matching appendValue's n.doubleValue() rounding; a bare comparison would diverge for
+    //     `+ 0.0`, matching ValueMaterializer's n.doubleValue() rounding; a bare comparison would diverge for
     //     a stored int64 > 2^53 (review finding C1).
     // (Review finding C2, option 2, covers the BIGINT-range superset handling.)
     private static boolean isPrefilterOnly(Type type, Domain domain) {

@@ -164,7 +164,11 @@ public class ValueMaterializer {
             if (!Double.isFinite(d) || d != Math.rint(d)) {
                 return null;
             }
-            return BigDecimal.valueOf(d).toBigIntegerExact();
+            // new BigDecimal(d), not BigDecimal.valueOf(d): valueOf uses the shortest round-trip
+            // string repr, so an integral double >= 2^53 (e.g. 2^63) would read back as a nearby
+            // "round" value rather than the exact integer the double represents. new BigDecimal(d)
+            // is the double's exact binary value -- the "read exactly what's stored" invariant.
+            return new BigDecimal(d).toBigIntegerExact();
         }
         return null;
     }

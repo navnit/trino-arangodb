@@ -206,6 +206,17 @@ class ValueMaterializerTest {
     }
 
     @Test
+    void integralDoubleReadsBackExactBinaryValueNotShortestRepr() {
+        // 2^63 is exactly representable as a double. new BigDecimal(d) yields its exact integer
+        // (9223372036854775808); BigDecimal.valueOf(d) would yield the shortest round-trip repr
+        // (9223372036854776000). This asserts the exact-binary path -- the "read exactly what's
+        // stored" invariant -- so a regression back to valueOf(d) is caught.
+        double twoPow63 = 0x1p63; // 9223372036854775808.0, exactly representable
+        assertThat((Int128) DEC38.getObject(materialize(DEC38, twoPow63, LENIENT), 0))
+                .isEqualTo(Int128.valueOf(new BigInteger("9223372036854775808")));
+    }
+
+    @Test
     void integralDoubleBeyondPrecisionIsCleanMismatchNotCrash() {
         // Spec review B1 mode A: 1e39 overflows DECIMAL(38,0); must be NULL, not ArithmeticException.
         assertThat(materialize(DEC38, 1e39, LENIENT).isNull(0)).isTrue();
