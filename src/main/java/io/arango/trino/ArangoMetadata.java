@@ -301,8 +301,9 @@ public class ArangoMetadata implements ConnectorMetadata {
     // segment AQL document path (e.g. List.of("address", "city")). Declines (Optional.empty())
     // whenever the chain doesn't root in a known column, indexes into a non-ROW type, hits an
     // anonymous row field, or bottoms out at a still-structured (ROW/ARRAY/DECIMAL) leaf --
-    // those stay Trino-evaluated, consistent with checkMaterializable's existing ARRAY/ROW/
-    // DECIMAL rejection. Segments are never joined into a String, so a field name that itself
+    // those stay Trino-evaluated: a structured leaf isn't a pushdown target, and since M4 Trino
+    // evaluates such dereferences over the materialized parent column (correct, just unoptimized).
+    // Segments are never joined into a String, so a field name that itself
     // contains a literal "." is not ambiguous (see AqlBuilder.documentAccessor).
     private static Optional<ArangoColumnHandle> resolveDereference(
             ConnectorExpression expression, Map<String, ColumnHandle> assignments) {

@@ -191,9 +191,10 @@ class ArangoConnectorPushdownTest extends AbstractTestQueryFramework {
     @Test
     void nestedProjectionReturnsCorrectValueProvingPushdownEngaged() {
         // If applyProjection failed to push this FieldDereference, Trino would fall back to
-        // materializing the whole "address" ROW itself -- which ArangoPageSourceProvider
-        // .checkMaterializable refuses to do (TrinoException NOT_SUPPORTED). So this query
-        // succeeding with the right value is itself proof the dereference was pushed.
+        // materializing the whole "address" ROW itself -- which (since M4) ValueMaterializer
+        // now supports, so that path would no longer fail loudly. The dereference projection
+        // is still preferred (narrower AQL, no structured-value materialization needed), so this
+        // query succeeding with the right value is itself proof the dereference was pushed.
         assertThat(query("SELECT address.city FROM arango.shop.people WHERE name = 'dee'"))
                 .matches("VALUES VARCHAR 'nyc'");
     }
@@ -205,7 +206,7 @@ class ArangoConnectorPushdownTest extends AbstractTestQueryFramework {
         // invisible to the sample. `val > 5` is a BIGINT range predicate, pushed to AQL as a prefilter
         // (bare IS_NUMBER guard) AND kept in Trino's residual (isPrefilterOnly). The AQL guard admits a
         // SUPERSET: IS_NUMBER drops "not-a-number" server-side, but fractional 42.5 PASSES it
-        // (IS_NUMBER(42.5) and 42.5 > 5), reaches appendValue, and reads back NULL -- so Trino's residual
+        // (IS_NUMBER(42.5) and 42.5 > 5), flows through ValueMaterializer, and reads back NULL -- so Trino's residual
         // re-check is what excludes it. The guard is intentionally bare: a `== FLOOR(...)` conjunct would
         // false-miss a stored int64 > 2^53 (review finding C3). Same correct result (10, 20), now
         // genuinely exercising the prefilter+residual backstop.
