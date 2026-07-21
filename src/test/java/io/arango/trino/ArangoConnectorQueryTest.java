@@ -107,13 +107,21 @@ class ArangoConnectorQueryTest {
     }
 
     @Test
-    void rowColumnMaterializesAndDereferenceStillPushes() {
+    void rowColumnAndScalarDereferenceBothMaterializeCorrectValues() {
         // whole-row select works post-M4 ...
         MaterializedResult whole = queryRunner.execute(
                 "SELECT address FROM arango.shop.profiles WHERE who = 'bob'");
         assertThat(whole.getRowCount()).isEqualTo(1);
         assertThat(whole.getMaterializedRows().get(0).getField(0)).isNotNull();
-        // ... and the pre-existing scalar dereference projection is unregressed
+        // ... and the pre-existing scalar dereference query still returns the correct value.
+        // Note: this class uses a raw QueryRunner (no plan-shape assertions available), so this
+        // is a value-only check -- it does NOT prove the dereference was pushed down as opposed
+        // to Trino falling back to materializing the whole ROW and evaluating ".city" itself
+        // (since M4, ValueMaterializer supports whole-ROW materialization, so that fallback would
+        // also return "london"/"berlin" here). The genuine pushdown guard is
+        // ArangoMetadataTest.applyProjectionPushesNestedFieldDereference (asserts the pushed
+        // column handle's path is ["address","city"]); a plan-shape variant of this check lives in
+        // ArangoConnectorPushdownTest.nestedProjectionReturnsCorrectValueProvingPushdownEngaged.
         MaterializedResult city = queryRunner.execute(
                 "SELECT address.city FROM arango.shop.profiles ORDER BY who");
         assertThat(city.getMaterializedRows().get(0).getField(0)).isEqualTo("london");

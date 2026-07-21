@@ -190,13 +190,18 @@ class ArangoConnectorPushdownTest extends AbstractTestQueryFramework {
 
     @Test
     void nestedProjectionReturnsCorrectValueProvingPushdownEngaged() {
-        // If applyProjection failed to push this FieldDereference, Trino would fall back to
-        // materializing the whole "address" ROW itself -- which (since M4) ValueMaterializer
-        // now supports, so that path would no longer fail loudly. The dereference projection
-        // is still preferred (narrower AQL, no structured-value materialization needed), so this
-        // query succeeding with the right value is itself proof the dereference was pushed.
+        // Since M4, ValueMaterializer can materialize a whole ROW, so a value-only assertion here
+        // would no longer discriminate: a failed dereference push would fall back to materializing
+        // the whole "address" ROW and evaluating ".city" over it in a residual ProjectNode, and
+        // that path returns the same correct value. What actually proves the dereference was
+        // pushed is the plan shape: `name = 'dee'` is a fully-pushed VARCHAR equality, so if the
+        // dereference is *also* pushed (as an ArangoColumnHandle with path ["address","city"] --
+        // see ArangoMetadataTest.applyProjectionPushesNestedFieldDereference for the direct unit
+        // guard), the plan is just a TableScan with nothing left to elide; a failed push would
+        // instead leave a ProjectNode computing .city over the materialized ROW.
         assertThat(query("SELECT address.city FROM arango.shop.people WHERE name = 'dee'"))
-                .matches("VALUES VARCHAR 'nyc'");
+                .matches("VALUES VARCHAR 'nyc'")
+                .isFullyPushedDown();
     }
 
     @Test
