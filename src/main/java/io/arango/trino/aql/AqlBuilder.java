@@ -47,7 +47,7 @@ public class AqlBuilder {
     // never reach this method.
     //
     // DOUBLE promotion: a stored int64 in a DOUBLE column is read back rounded to double
-    // (ArangoPageSource.appendValue does n.doubleValue()), but ArangoDB compares int64-vs-double by
+    // (ValueMaterializer does n.doubleValue()), but ArangoDB compares int64-vs-double by
     // exact mathematical value, not in double space -- so a bare `d.f <op> @v` diverges from the read
     // path for magnitudes > 2^53 (a stored 2^53+1 satisfies `> 2^53` in AQL yet reads back as 2^53,
     // and `== 2^54` misses a stored 2^54-1 that reads back as 2^54). Promoting the operand into double

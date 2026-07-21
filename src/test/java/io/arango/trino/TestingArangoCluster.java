@@ -15,10 +15,14 @@ public final class TestingArangoCluster implements AutoCloseable {
                 .withExposedService("coordinator", 8529,
                         Wait.forHttp("/_api/version").forStatusCode(200)
                                 // A cold ubuntu-latest runner (2 vCPU, image freshly pulled) forms the
-                                // 4-node cluster far slower than a warm local box, where it is ready in
-                                // ~15s; 3 minutes was not enough headroom and timed CI out. 5 minutes
-                                // absorbs the slow cold boot without masking a genuine hang.
-                                .withStartupTimeout(Duration.ofMinutes(5)));
+                                // 3-node cluster (agency + one dbserver + coordinator) far slower than a
+                                // warm local box, where it is ready in ~15-30s. These ITs are @Tag("cluster")
+                                // and run only in the isolated, non-blocking cluster-its CI job (surefire
+                                // skipped, so the runner is uncontended and boots exactly one cluster), which
+                                // affords a generous 8-minute window; below that the 2-vCPU runner repeatedly
+                                // timed the boot out. 8 minutes absorbs the slow cold boot without masking a
+                                // genuine hang (the job also has its own 25-minute ceiling).
+                                .withStartupTimeout(Duration.ofMinutes(8)));
         try {
             compose.start();
             awaitClusterReady();

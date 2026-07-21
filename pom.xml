@@ -27,6 +27,16 @@
              so CI passes the daemon's own reported max via -Ddocker.api.version=... See
              .github/workflows/ci.yml. -->
         <docker.api.version>1.51</docker.api.version>
+        <!-- JUnit5 tag filtering for the failsafe (integration-test) phase. By default the
+             heavy multi-node cluster ITs (@Tag("cluster"): ShardParallelClusterIT and
+             ShardParallelCorrectnessIT) are EXCLUDED, because standing up a real ArangoDB
+             cluster is too slow/flaky to boot within the wait window on GitHub's 2-vCPU
+             runner and was blocking every PR. The default `mvn verify` therefore runs the
+             fast, reliable ITs (e.g. PackagingSmokeIT) and skips the cluster ones. The
+             `cluster-its` profile flips these to run ONLY the cluster ITs, which CI drives
+             in a separate, non-blocking job (see .github/workflows/ci.yml). -->
+        <it.excludedGroups>cluster</it.excludedGroups>
+        <it.groups></it.groups>
     </properties>
 
     <dependencies>
@@ -257,6 +267,10 @@
                 <artifactId>maven-failsafe-plugin</artifactId>
                 <version>3.5.2</version>
                 <configuration>
+                    <!-- Tag filtering (see it.excludedGroups / it.groups above): default build
+                         excludes @Tag("cluster") ITs; the cluster-its profile includes only them. -->
+                    <excludedGroups>${it.excludedGroups}</excludedGroups>
+                    <groups>${it.groups}</groups>
                     <!-- Docker Remote API workaround, same as surefire: failsafe is a
                          separate plugin and does NOT inherit surefire's config, so the
                          Testcontainers-shaded docker-java client needs api.version here too. -->
@@ -280,4 +294,18 @@
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <!-- Run ONLY the @Tag("cluster") ITs (the heavy multi-node ArangoDB cluster tests that
+             the default build excludes). CI drives this in a separate, non-blocking job so the
+             slow/flaky cluster boot never gates a PR while these still get exercised. Invoke with
+             `mvn verify -Pcluster-its`. -->
+        <profile>
+            <id>cluster-its</id>
+            <properties>
+                <it.excludedGroups></it.excludedGroups>
+                <it.groups>cluster</it.groups>
+            </properties>
+        </profile>
+    </profiles>
 </project>

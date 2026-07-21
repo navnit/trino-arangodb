@@ -11,6 +11,7 @@ import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.predicate.TupleDomain;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 
@@ -24,6 +25,10 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+// @Tag("cluster"): excluded from the default failsafe run (too slow/flaky to boot a real
+// ArangoDB cluster on a 2-vCPU CI runner within the wait window); run via `mvn verify -Pcluster-its`
+// in a separate, non-blocking CI job. See pom.xml it.excludedGroups and .github/workflows/ci.yml.
+@Tag("cluster")
 @ExtendWith(SharedArangoClusterExtension.class)
 class ShardParallelCorrectnessIT {
     private static TestingArangoCluster cluster;
