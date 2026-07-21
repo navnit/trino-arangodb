@@ -6,6 +6,8 @@ import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.SqlRow;
 import io.trino.spi.type.ArrayType;
+import io.trino.spi.type.DecimalType;
+import io.trino.spi.type.Int128;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
 import org.junit.jupiter.api.Test;
@@ -28,6 +30,8 @@ class ValueMaterializerTest {
 
     private static final RowType ADDRESS = RowType.rowType(
             RowType.field("city", VARCHAR), RowType.field("zip", BIGINT));
+
+    private static final DecimalType DEC38 = DecimalType.createDecimalType(38, 0);
 
     // Writes one value through ValueMaterializer and returns the built single-position block.
     static Block materialize(Type type, Object value, ArangoConfig.TypeCoercion coercion) {
@@ -180,5 +184,52 @@ class ValueMaterializerTest {
         assertThatThrownBy(() -> materialize(type, value, STRICT))
                 .isInstanceOfSatisfying(TrinoException.class,
                         e -> assertThat(e.getMessage()).contains("value at col[1].b")); // spec §7 shape
+    }
+
+    @Test
+    void decimalAcceptsAnyIntegralNumber() {
+        assertThat((Int128) DEC38.getObject(materialize(DEC38, 42L, LENIENT), 0))
+                .isEqualTo(Int128.valueOf(42));
+        // uint64 max -- the value class that creates DECIMAL(38,0) columns in the first place
+        BigInteger uint64Max = new BigInteger("18446744073709551615");
+        assertThat((Int128) DEC38.getObject(materialize(DEC38, uint64Max, LENIENT), 0))
+                .isEqualTo(Int128.valueOf(uint64Max));
+        assertThat((Int128) DEC38.getObject(materialize(DEC38, 42.0, LENIENT), 0))
+                .isEqualTo(Int128.valueOf(42));
+    }
+
+    @Test
+    void integralDoubleBeyondLongRangeReadsBack() {
+        // Spec review B1 mode B: 1e19 > 2^63 must NOT be rejected by BIGINT's long-range bound.
+        assertThat((Int128) DEC38.getObject(materialize(DEC38, 1e19, LENIENT), 0))
+                .isEqualTo(Int128.valueOf(new BigInteger("10000000000000000000")));
+    }
+
+    @Test
+    void integralDoubleBeyondPrecisionIsCleanMismatchNotCrash() {
+        // Spec review B1 mode A: 1e39 overflows DECIMAL(38,0); must be NULL, not ArithmeticException.
+        assertThat(materialize(DEC38, 1e39, LENIENT).isNull(0)).isTrue();
+        assertThatThrownBy(() -> materialize(DEC38, 1e39, STRICT)).isInstanceOf(TrinoException.class);
+    }
+
+    @Test
+    void fractionalAndOversizedValuesAreMismatches() {
+        assertThat(materialize(DEC38, 42.5, LENIENT).isNull(0)).isTrue();
+        assertThat(materialize(DEC38, BigInteger.TEN.pow(39), LENIENT).isNull(0)).isTrue(); // >38 digits
+        assertThat(materialize(DEC38, "42", LENIENT).isNull(0)).isTrue();                   // non-number
+    }
+
+    @Test
+    void nestedDecimalLeavesMaterializeThroughTheSameDispatch() {
+        ArrayType arrayOfDec = new ArrayType(DEC38);
+        Block elements = arrayOfDec.getObject(
+                materialize(arrayOfDec, List.of(1L, new BigInteger("18446744073709551615")), LENIENT), 0);
+        assertThat((Int128) DEC38.getObject(elements, 1))
+                .isEqualTo(Int128.valueOf(new BigInteger("18446744073709551615")));
+
+        RowType rowWithDec = RowType.rowType(RowType.field("x", DEC38));
+        SqlRow row = rowWithDec.getObject(materialize(rowWithDec, Map.of("x", 5L), LENIENT), 0);
+        assertThat((Int128) DEC38.getObject(row.getRawFieldBlock(0), row.getRawIndex()))
+                .isEqualTo(Int128.valueOf(5));
     }
 }

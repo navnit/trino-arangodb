@@ -8,11 +8,16 @@ import io.trino.spi.block.RowBlockBuilder;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.BigintType;
 import io.trino.spi.type.BooleanType;
+import io.trino.spi.type.DecimalType;
+import io.trino.spi.type.Decimals;
 import io.trino.spi.type.DoubleType;
+import io.trino.spi.type.Int128;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
 
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.List;
@@ -92,6 +97,17 @@ public class ValueMaterializer {
             });
             return;
         }
+        if (type instanceof DecimalType decimalType) {
+            // TypeMapper only ever emits DECIMAL(38,0) -- always a long decimal (38 > 18), scale 0,
+            // so the unscaled value IS the value and the write path is Int128 via writeObject.
+            BigInteger unscaled = integralValueOf(value);
+            // Overflow gate BEFORE Int128.valueOf, which throws past 128 bits (spec review B1):
+            // an integral double >= 1e39 must be a mismatch (lenient NULL), not an ArithmeticException.
+            if (unscaled != null && !Decimals.overflows(unscaled, decimalType.getPrecision())) {
+                decimalType.writeObject(out, Int128.valueOf(unscaled));
+                return;
+            }
+        }
         mismatch(out, type, value, columnName);
     }
 
@@ -126,9 +142,30 @@ public class ValueMaterializer {
             double d = f;
             return Double.isFinite(d) && d == Math.rint(d) && d >= -0x1p63 && d < 0x1p63;
         }
-        if (value instanceof java.math.BigInteger bi) {
+        if (value instanceof BigInteger bi) {
             return bi.bitLength() < 64;
         }
         return false;
+    }
+
+    // The integral value of a number, or null if it isn't one. Deliberately NOT bounded to signed
+    // 64-bit like isIntegralInLongRange: DECIMAL(38,0) exists precisely to hold uint64-range values
+    // (spec review B1 -- reusing the long-range bound would wrongly null e.g. 1e19). Magnitude is
+    // bounded by the caller's Decimals.overflows gate instead.
+    private static BigInteger integralValueOf(Object value) {
+        if (value instanceof Long || value instanceof Integer || value instanceof Short || value instanceof Byte) {
+            return BigInteger.valueOf(((Number) value).longValue());
+        }
+        if (value instanceof BigInteger bi) {
+            return bi;
+        }
+        if (value instanceof Double || value instanceof Float) {
+            double d = ((Number) value).doubleValue();
+            if (!Double.isFinite(d) || d != Math.rint(d)) {
+                return null;
+            }
+            return BigDecimal.valueOf(d).toBigIntegerExact();
+        }
+        return null;
     }
 }
