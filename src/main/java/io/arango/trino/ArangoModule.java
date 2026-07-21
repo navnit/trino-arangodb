@@ -19,6 +19,7 @@ public class ArangoModule implements Module {
         binder.bind(SchemaResolver.class).in(Scopes.SINGLETON);
         binder.bind(AqlBuilder.class).in(Scopes.SINGLETON);
         binder.bind(ArangoMetadata.class).in(Scopes.SINGLETON);
+        binder.bind(io.arango.trino.split.ShardFanoutCapability.class).in(Scopes.SINGLETON);
         binder.bind(ArangoSplitManager.class).in(Scopes.SINGLETON);
         binder.bind(ArangoPageSourceProvider.class).in(Scopes.SINGLETON);
         binder.bind(ArangoConnector.class).in(Scopes.SINGLETON);

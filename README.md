@@ -7,9 +7,10 @@ ArangoDB **databases map to Trino schemas** and **collections map to tables**; s
 inferred by sampling documents. The connector is currently **read-only**, with equality/IN
 filter pushdown for all scalar types, guarded numeric range pushdown, and `LIMIT` pushdown.
 
-> **Status.** Milestones **M1** ("read skeleton") and **M2** ("filter-pushdown completion")
-> are complete. Writes (`INSERT`/`DELETE`), value materialization for `ARRAY`/`ROW`/`DECIMAL`,
-> and shard-parallel splits are out of scope so far — see [Limitations](#limitations).
+> **Status.** Milestones **M1** ("read skeleton"), **M2** ("filter-pushdown completion"), and
+> **M3** ("shard-parallel splits") are complete. Writes (`INSERT`/`DELETE`) and value
+> materialization for `ARRAY`/`ROW`/`DECIMAL` are out of scope so far — see
+> [Limitations](#limitations).
 
 ## Requirements
 
@@ -56,6 +57,9 @@ arangodb.password=
 | `arangodb.schema.sample-random` | `false` | Sample randomly (vs. the first N documents). |
 | `arangodb.schema.mixed-type-strategy` | `VARCHAR` | Fallback type when a field holds genuinely incompatible types across the sample. (`JSON` is accepted but not yet wired to an output type.) |
 | `arangodb.type-coercion` | `lenient` | Per-cell type-mismatch policy — see [Type coercion](#type-coercion). |
+| `arangodb.shards-per-split` | `1` | Target number of shards grouped into each split on cluster fan-out. See [Sharding / parallelism](#sharding--parallelism). |
+| `arangodb.max-splits` | `32` | Hard cap on the number of splits per collection scan. |
+| `arangodb.shard-parallelism-enabled` | `true` | Set to `false` to force single-split scans unconditionally and never invoke the internal `shardIds` option. |
 
 ## Data model
 
@@ -92,6 +96,47 @@ Merging an integer-typed and a floating-point occurrence of the same field **wid
 but selecting their **values** raises `NOT_SUPPORTED` until a later milestone (see
 [Limitations](#limitations)).
 
+## Sharding / parallelism
+
+On a cluster deployment, a collection scan can fan out into multiple Trino splits instead of
+always reading the whole collection as a single unit. On every `getSplits` call, the connector
+works through:
+
+1. **Discover** — fetch the collection's shard count, sharding strategy, and SmartJoin attribute.
+2. **Allowlist gate** — a collection is only eligible for fan-out if it has more than one shard,
+   its sharding strategy is a non-smart hash strategy (`hash`, `community-compat`, or
+   `enterprise-compat`), and it has no `smartJoinAttribute`. SmartGraph/SmartJoin collections are
+   always excluded — their edges can live in multiple internal sub-shards, which would
+   double-count rows under naive per-shard enumeration.
+3. **Enumerate** — list the collection's shard IDs.
+4. **Group** — partition the shard IDs into balanced groups: the number of splits is
+   `min(ceil(shardCount / arangodb.shards-per-split), arangodb.max-splits)`. Every shard lands in
+   exactly one group; `arangodb.max-splits` is a hard cap that can force more than
+   `arangodb.shards-per-split` shards into a single group once the ceiling exceeds it.
+5. **Probe** — before trusting ArangoDB's internal `shardIds` query option, the connector
+   requires both a version pin (the server must report **≥ 3.11**) and an active capability
+   probe: for the groups about to be emitted, the sum of the per-group `shardIds`-scoped counts
+   must equal the full collection count. The verdict is computed once per connector process and
+   cached; an inconclusive probe (e.g. an empty collection) is retried on a later call rather
+   than cached.
+6. **Emit** — one Trino split per shard group, each split executing its own AQL query scoped to
+   that group's `shardIds`.
+
+Non-smart hash collections with more than one shard, on a cluster, are the only case that gets
+more than one split. **Every other case falls back to a single split** that scans the whole
+collection: SmartGraph/SmartJoin collections, satellite collections, single-server deployments
+(no sharding at all), and any multi-shard collection that fails the allowlist gate, fails the
+capability probe, or whose shard discovery throws. A multi-shard collection that falls back this
+way logs a `WARN` so the fallback is observable.
+
+Set `arangodb.shard-parallelism-enabled=false` to force single-split scans unconditionally — this
+also skips the version/capability probe and never invokes the internal `shardIds` option.
+
+**Interaction with `LIMIT` pushdown:** with shard-parallelism enabled (the default), a pushed
+`LIMIT n` runs independently within each split's own AQL cursor — a per-split reduction, not a
+global one — so Trino still applies the final `LIMIT` itself over the merged results. Only with
+`arangodb.shard-parallelism-enabled=false` (always single-split) is a pushed limit exact.
+
 ## Predicate & LIMIT pushdown
 
 The read path is **type-exact** (see below), which lets the connector push filters into AQL
@@ -110,7 +155,9 @@ knowing the server-side predicate admits exactly the values the reader would kee
   read path reads as `NULL`), so Trino re-checks after read.
 - **`DOUBLE` comparisons** render as `IS_NUMBER(d.f) AND (d.f + 0.0) <op> @v` — the `+ 0.0`
   promotes a stored `int64` into double space so AQL compares exactly what the reader rounds to.
-- `LIMIT` is pushed into the scan (single-split, so the pushed limit is exact).
+- `LIMIT` is pushed into the scan. It is exact only for a single-split scan; with
+  shard-parallelism enabled (the default), the pushed limit is a per-split reduction, not a
+  global guarantee — see [Sharding / parallelism](#sharding--parallelism).
 - **Strict mode disables pushdown entirely** (`type-coercion=strict`), so a type-mismatched row
   is never silently dropped server-side before the strict error can be raised.
 
@@ -133,7 +180,14 @@ pushdown safe — the pushed AQL and the reader agree on exactly which values qu
 - **`ARRAY` / `ROW` / `DECIMAL` values are not materializable yet** — such columns appear in the
   schema, but projecting them raises `NOT_SUPPORTED`. Filtering/selecting other columns of the
   same table is unaffected.
-- **One split per table** — no shard/range fan-out; a collection is scanned as a single unit.
+- **Shard-parallel fan-out is narrow by design** — only non-smart, multi-shard hash collections on
+  a cluster get more than one split; SmartGraph/SmartJoin collections, satellite collections, and
+  single-server deployments always scan as a single split. See
+  [Sharding / parallelism](#sharding--parallelism).
+- **No cross-split snapshot consistency** — each split executes as an independent AQL query, so a
+  concurrently-mutated collection can yield a read that is not a single point-in-time snapshot
+  across splits (the same limitation applies, in miniature, to any single AQL cursor). Documented,
+  not solved.
 - **Schema cache has no TTL** — resolved column metadata is memoized per table for the connector's
   lifetime.
 - **Non-finite stored doubles** (`Infinity`/`NaN`) can be dropped by a fully-pushed `DOUBLE`

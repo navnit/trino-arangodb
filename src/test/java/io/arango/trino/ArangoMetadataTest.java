@@ -418,7 +418,9 @@ class ArangoMetadataTest {
 
     @Test
     void applyLimitPushesAndGuaranteesLimit() {
-        ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
+        // limitGuaranteed=true requires a single-split scan (ArangoMetadataLimitTest covers the
+        // shard-parallelism-enabled => not-guaranteed case); this test is about push mechanics.
+        ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig().setShardParallelismEnabled(false));
         ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.empty());
 
         Optional<LimitApplicationResult<ConnectorTableHandle>> result = metadata.applyLimit(null, handle, 10L);
@@ -441,7 +443,9 @@ class ArangoMetadataTest {
 
     @Test
     void applyLimitPushesTighterLimitOverExistingLooserOne() {
-        ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
+        // limitGuaranteed=true requires a single-split scan (ArangoMetadataLimitTest covers the
+        // shard-parallelism-enabled => not-guaranteed case); this test is about push mechanics.
+        ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig().setShardParallelismEnabled(false));
         ArangoTableHandle handle = new ArangoTableHandle("shop", "users", false, TupleDomain.all(), OptionalLong.of(10L));
 
         Optional<LimitApplicationResult<ConnectorTableHandle>> result = metadata.applyLimit(null, handle, 5L);

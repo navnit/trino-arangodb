@@ -3,6 +3,7 @@ package io.arango.trino;
 import com.google.common.collect.ImmutableMap;
 import io.arango.trino.client.ArangoClient;
 import io.trino.sql.planner.plan.FilterNode;
+import io.trino.sql.planner.plan.LimitNode;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.MaterializedResult;
@@ -176,8 +177,15 @@ class ArangoConnectorPushdownTest extends AbstractTestQueryFramework {
     }
 
     @Test
-    void limitIsFullyPushedDown() {
-        assertThat(query("SELECT name FROM arango.shop.users LIMIT 2")).isFullyPushedDown();
+    void limitIsNotFullyPushedDownWhenShardParallelismEnabled() {
+        // Master spec §6.2 (Task 7 fix): with shard-parallelism enabled (the default), a table
+        // may fan out into multiple splits (ArangoSplitManager), each of which applies LIMIT n
+        // independently, so the pushed AQL LIMIT is no longer an exact global cap.
+        // ArangoMetadata.applyLimit now reports limitGuaranteed=false, so Trino must keep its own
+        // Limit node on top of the pushed-down AQL LIMIT rather than eliding it (ArangoMetadataLimitTest
+        // covers the boolean directly; this proves the planner actually honors it end to end).
+        assertThat(query("SELECT name FROM arango.shop.users LIMIT 2"))
+                .isNotFullyPushedDown(LimitNode.class);
     }
 
     @Test

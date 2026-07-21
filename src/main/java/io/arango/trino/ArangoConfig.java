@@ -21,6 +21,9 @@ public class ArangoConfig {
     private boolean sampleRandom = false;
     private MixedTypeStrategy mixedTypeStrategy = MixedTypeStrategy.VARCHAR;
     private TypeCoercion typeCoercion = TypeCoercion.LENIENT;
+    private int shardsPerSplit = 1;
+    private int maxSplits = 32;
+    private boolean shardParallelismEnabled = true;
 
     @NotNull
     public String getHosts() { return hosts; }
@@ -71,5 +74,40 @@ public class ArangoConfig {
     @ConfigDescription("Per-cell type-mismatch policy: LENIENT reads a mismatched value as NULL, STRICT raises an error")
     public ArangoConfig setTypeCoercion(TypeCoercion typeCoercion) {
         this.typeCoercion = typeCoercion; return this;
+    }
+
+    @Min(1)
+    public int getShardsPerSplit() {
+        return shardsPerSplit;
+    }
+
+    @Config("arangodb.shards-per-split")
+    @ConfigDescription("Target number of shards grouped into each split on cluster fan-out")
+    public ArangoConfig setShardsPerSplit(int shardsPerSplit) {
+        this.shardsPerSplit = shardsPerSplit;
+        return this;
+    }
+
+    @Min(1)
+    public int getMaxSplits() {
+        return maxSplits;
+    }
+
+    @Config("arangodb.max-splits")
+    @ConfigDescription("Hard cap on the number of splits per collection scan")
+    public ArangoConfig setMaxSplits(int maxSplits) {
+        this.maxSplits = maxSplits;
+        return this;
+    }
+
+    public boolean isShardParallelismEnabled() {
+        return shardParallelismEnabled;
+    }
+
+    @Config("arangodb.shard-parallelism-enabled")
+    @ConfigDescription("Enable per-shard parallel splits on clusters; false forces a single split and never uses the internal shardIds API")
+    public ArangoConfig setShardParallelismEnabled(boolean shardParallelismEnabled) {
+        this.shardParallelismEnabled = shardParallelismEnabled;
+        return this;
     }
 }
