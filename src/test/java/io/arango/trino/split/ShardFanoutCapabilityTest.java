@@ -72,11 +72,26 @@ class ShardFanoutCapabilityTest {
     }
 
     @Test
-    void disabledWhenServerIgnoresShardIds() {
+    void serverIgnoringShardIdsNeverFansOutAndDoesNotLatch() {
         // server ignores shardIds -> every shard-scoped count == full -> sum (200) != full (100)
         FakeClient client = new FakeClient("3.12.0", 100, Map.of("s1", 100L, "s2", 100L));
         ShardFanoutCapability cap = new ShardFanoutCapability(client);
         assertFalse(cap.canFanOut("db", "c", List.of(List.of("s1"), List.of("s2"))));
+        // Mismatch is inconclusive (UNKNOWN), not a permanent DISABLED latch -> the probe re-runs.
+        assertFalse(cap.canFanOut("db", "c", List.of(List.of("s1"), List.of("s2"))));
+        assertEquals(2, client.versionCalls.get(), "mismatch must not latch: probe should re-run on retry");
+    }
+
+    @Test
+    void writeSkewMismatchDoesNotLatch() {
+        // First probe races a concurrent write: per-shard counts (50+40=90) don't match full (100).
+        FakeClient client = new FakeClient("3.12.0", 100, Map.of("s1", 50L, "s2", 40L));
+        ShardFanoutCapability cap = new ShardFanoutCapability(client);
+        assertFalse(cap.canFanOut("db", "c", List.of(List.of("s1"), List.of("s2"))));
+        // Writes settle -> counts now reconcile -> the retry must succeed (no permanent latch).
+        client.full = 100;
+        client.perShard = Map.of("s1", 60L, "s2", 40L);
+        assertTrue(cap.canFanOut("db", "c", List.of(List.of("s1"), List.of("s2"))));
     }
 
     @Test

@@ -73,8 +73,9 @@ public class ArangoSplitManager implements ConnectorSplitManager {
             }
             List<List<String>> groups = ShardGrouping.partition(shardIds, config.getShardsPerSplit(), config.getMaxSplits());
             if (!capability.canFanOut(db, coll, groups)) { // probe the ACTUAL groups we would emit
-                log.warn("Collection %s.%s scanned serially: server did not confirm the shardIds option "
-                        + "(version pin or capability probe failed)", db, coll);
+                log.warn("Collection %s.%s scanned serially: shardIds capability not confirmed this cycle "
+                        + "(server below minimum version, or the probe was inconclusive — e.g. concurrent "
+                        + "writes or an empty collection); will re-probe on the next query", db, coll);
                 return List.of(SINGLE);
             }
             return groups.stream().map(ArangoSplit::new).toList();

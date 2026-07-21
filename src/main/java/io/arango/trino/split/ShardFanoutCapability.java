@@ -57,7 +57,12 @@ public class ShardFanoutCapability {
                 }
             }
             if (sum != full) {
-                return Verdict.DISABLED;                  // conclusive: server ignored shardIds -> would N×-duplicate
+                // Inconclusive, NOT conclusive: `full` and the per-group counts are separate queries,
+                // so a concurrent write can make sum != full from write-skew alone. A server that truly
+                // ignores shardIds also lands here (sum = N×full) and still never fans out (UNKNOWN ->
+                // single split). Either way we retry next time rather than latching DISABLED for the
+                // whole process lifetime. Safe: UNKNOWN never enables fan-out, so never duplicates.
+                return Verdict.UNKNOWN;
             }
             return anyNarrower ? Verdict.ENABLED : Verdict.UNKNOWN; // all-in-one-group -> can't confirm narrowing, retry
         }
