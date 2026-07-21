@@ -371,7 +371,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - Consumes: Task 3's path-segment convention.
 - Produces: the `ROW` dispatch branch; `.field` path segments.
 
-- [ ] **Step 1: Write failing tests** (new imports: `io.trino.spi.block.SqlRow`, `io.trino.spi.type.RowType`, `java.util.HashMap`, `java.util.Map`):
+- [ ] **Step 1: Write failing tests** (new imports: `io.trino.spi.block.SqlRow`, `io.trino.spi.type.RowType`, `java.util.Map`):
 
 ```java
     private static final RowType ADDRESS = RowType.rowType(
@@ -648,6 +648,8 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
     // those stay Trino-evaluated: a structured leaf isn't a pushdown target, and since M4 Trino
     // evaluates such dereferences over the materialized parent column (correct, just unoptimized).`
 
+- [ ] **Step 3b: Reword two stale comments in `ArangoConnectorPushdownTest.java`** (comments only — both tests stay green): around line 195, the comment saying the dereference avoids what "`checkMaterializable` refuses to do (`TrinoException` `NOT_SUPPORTED`)" — reword to say the dereference *projection* is still preferred but post-M4 the whole ROW would also materialize; around line 208, "reaches `appendValue`, and reads back NULL" — `appendValue` no longer exists; say the value flows through `ValueMaterializer`.
+
 - [ ] **Step 4: Run the affected suites**
   Run: `mvn test -Dtest='ArangoPageSourceProviderTest,ArangoMetadataTest,ArangoConnectorPushdownTest'`
   Expected: PASS (dereference-pushdown behavior unchanged).
@@ -735,15 +737,18 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
     @Test
     void strictModeRaisesOnNestedMismatchThroughSql() {
-        // bob's tags hold 5L under the VARCHAR element type -> nested mismatch under strict
+        // bob's tags hold 5L under the VARCHAR element type -> nested mismatch under strict.
+        // Assert only the connector's message text: the error-code NAME does not surface through
+        // DistributedQueryRunner's failure wrapping (see the pre-existing
+        // ArangoConnectorPushdownTest.strictModeRaisesOnTypeMismatch, which asserts message text
+        // only); the code identity is already unit-covered in ValueMaterializerTest.
         assertThatThrownBy(() -> queryRunner.execute(
                 "SELECT tags FROM arango_strict.shop.profiles"))
-                .hasMessageContaining("ARANGODB_TYPE_CONVERSION_ERROR")
                 .hasMessageContaining("value at tags[");
     }
 ```
 
-  (add `import static org.assertj.core.api.Assertions.assertThatThrownBy;`. Note the strict-failure message assertions go through Trino's query-failure wrapping — if the error-code name doesn't surface in the wrapped message, assert `.hasMessageContaining("value at tags[")` only; the error identity is already unit-covered in `ValueMaterializerTest`.)
+  (add `import static org.assertj.core.api.Assertions.assertThatThrownBy;`.)
 
 - [ ] **Step 3: Run**
   Run: `mvn test -Dtest=ArangoConnectorQueryTest`
@@ -771,7 +776,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - Modify: `CLAUDE.md` (read-path items 6 and 7; "What this is" milestone sentence)
 - Modify: `docs/superpowers/specs/2026-07-18-arangodb-trino-connector-design.md` (§10 table, lines 336–343)
 
-- [ ] **Step 1: README.** In the status blockquote, change "Milestones **M1** … **M3** ("shard-parallel splits") are complete. Writes (`INSERT`/`DELETE`) and value materialization for `ARRAY`/`ROW`/`DECIMAL` are out of scope so far" to "Milestones **M1**–**M4** are complete (**M4**: `ARRAY`/`ROW`/`DECIMAL` value materialization). Writes (`INSERT`/`DELETE`) are out of scope so far". In Limitations, delete the whole "**`ARRAY` / `ROW` / `DECIMAL` values are not materializable yet**" bullet (lines 180–182). If any other README section (search for `NOT_SUPPORTED` and "later milestone") repeats the old limitation, update it to describe the M4 behavior: structured values materialize recursively; under `lenient` a type-mismatched leaf reads as `NULL` (only that element/field), under `strict` it raises with a path.
+- [ ] **Step 1: README.** In the status blockquote, change "Milestones **M1** … **M3** ("shard-parallel splits") are complete. Writes (`INSERT`/`DELETE`) and value materialization for `ARRAY`/`ROW`/`DECIMAL` are out of scope so far" to "Milestones **M1**–**M4** are complete (**M4**: `ARRAY`/`ROW`/`DECIMAL` value materialization). Writes (`INSERT`/`DELETE`) are out of scope so far". In Limitations, delete the whole "**`ARRAY` / `ROW` / `DECIMAL` values are not materializable yet**" bullet (lines 180–182). Two more stale spots that the Step 4 grep will NOT fully catch: the type-support paragraph around lines 95–96 ("…but selecting their **values** raises `NOT_SUPPORTED` until a later milestone") and the type-mapping table rows around lines 89–90 that mark ARRAY/ROW/DECIMAL as schema-only — update both to describe the M4 behavior: structured values materialize recursively; under `lenient` a type-mismatched leaf reads as `NULL` (only that element/field), under `strict` it raises with a path.
 
 - [ ] **Step 2: CLAUDE.md.** Three edits:
   - "What this is": change "Currently at milestone M3 ("shard-parallel splits")" to "Currently at milestone M4 ("structured-type materialization")" and append "; recursive ARRAY/ROW/DECIMAL value materialization (M4)" to the feature list sentence.
