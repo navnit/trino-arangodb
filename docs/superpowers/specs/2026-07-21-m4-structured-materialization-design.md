@@ -35,7 +35,7 @@ M1's type-exactness invariant, extended one level down, recursively:
 
 > **A mismatch is handled at the exact depth it occurs.** Under `lenient`, only the offending element/field reads as `NULL` — surrounding good data survives (`[1, "oops", 3]` under `ARRAY(BIGINT)` reads `[1, NULL, 3]`). Under `strict`, a mismatch at any depth raises `ARANGODB_TYPE_CONVERSION_ERROR`, naming the column and the path to the leaf.
 
-A *structural* mismatch (an `ARRAY` column holding a scalar, a `ROW` column holding a list) is simply a mismatch at that level: lenient nulls that whole value, strict raises. An **absent** ROW field is `NULL`, never a mismatch — identical to how a missing top-level field reads today (`row.get(name) == null` → `appendNull`), because the inferred schema is a union across sampled documents and absence is normal.
+A *structural* mismatch (an `ARRAY` column holding a scalar, a `ROW` column holding a list) is simply a mismatch at that level: lenient nulls that whole value, strict raises. An **absent** ROW field is `NULL`, never a mismatch — identical to how a missing top-level field reads today (`row.get(name) == null` → `appendNull`), because the inferred schema is a union across sampled documents and absence is normal. Likewise a **stored `null`** at any depth (`[1, null, 3]`, a null row field) is `NULL` in both modes, never a mismatch — the null-check-first rule of the moved scalar code applies recursively; strict mode raises only on genuine type mismatches.
 
 Pushed filters cannot disagree with any of this: `isPushable` only ever pushes `BOOLEAN`/`VARCHAR`/`BIGINT`/`DOUBLE` top-level columns, so structured values are never compared server-side.
 
@@ -49,7 +49,7 @@ Pushed filters cannot disagree with any of this: `isPushable` only ever pushes `
 | `ArangoPageSource` (modify) | Shrinks to pure cursor/paging: constructs `new ValueMaterializer(coercion)`, the row loop delegates to `writeValue`. Public constructor signature unchanged. |
 | `ArangoPageSourceProvider` (modify) | `checkMaterializable` + its call + comment deleted. |
 | `ArangoMetadata` (comment only) | `resolveDereference`'s comment says structured leaves decline "consistent with checkMaterializable's rejection" — reworded: they decline because a structured leaf can't be a pushdown target, and Trino now evaluates such dereferences over the materialized parent column (correct either way). |
-| `README.md` / `CLAUDE.md` | Limitations no longer list ARRAY/ROW/DECIMAL materialization; read-path docs describe recursive leaf-level semantics. |
+| `README.md` / `CLAUDE.md` | Limitations no longer list ARRAY/ROW/DECIMAL materialization; read-path docs describe recursive leaf-level semantics. Specifically stale and easy to miss: CLAUDE.md read-path item 7's "The structured-type branch in `appendValue` is dead in practice because `checkMaterializable` already rejects those columns upstream" (the branch becomes live and `checkMaterializable` is gone), and the equivalent code comment at `ArangoPageSource.java:91-92` (dies with the extraction). |
 | Master spec §10 | Milestone table renumbered (see header note). |
 
 No change to `AqlBuilder` (the `RETURN {"col": d["col"]}` projection already ships full nested values), `ArangoSplitManager`, `SchemaResolver`, or `TypeMapper`. The driver deserializes nested JSON into the same `Map`/`List`/`Integer`/`Long`/`Double`/`BigInteger` shapes `TypeMapper.inferType` sampled, so inference and read agree by construction — no new client surface.
@@ -70,13 +70,15 @@ Dispatch on (Trino type, runtime value), recursing for containers:
 
 `RowType` field names are always present (inference builds them from document keys; `RowType.field(name, type)`), so `getName().orElseThrow()` is safe — same assumption `mergeRows` already makes.
 
+The recursive helper re-enters the **full** dispatch table — scalar, DECIMAL, and container branches alike — not just the container branches. `TypeMapper.inferType` recurses element/field types, so `ARRAY(DECIMAL(38,0))` and `ROW(x DECIMAL(38,0))` are reachable schemas and their leaves must materialize through the same DECIMAL/scalar rules as top-level columns.
+
 ### 5.1 DECIMAL acceptance
 
 `TypeMapper` emits exactly one decimal type — `DECIMAL(38,0)`, always a **long decimal** (precision 38 > 18), from a `BigInteger` wider than 63 bits or a `bigint + decimal` merge. Because the merge is what usually creates the column, most stored values under it are plain `Long`s and must read back. Mirroring `BIGINT`'s integral rule:
 
 - `Long` / `Integer` / `Short` / `Byte` → `Int128.valueOf(longValue)`.
 - `BigInteger` → accepted iff `!Decimals.overflows(bi, 38)` (the `BigInteger` overload — checking *before* `Int128.valueOf`, which throws past 128 bits); wider is a mismatch (defensive only — JSON tops out at uint64's 20 digits; VelocyPack-native writers could exceed it).
-- `Double` / `Float` → accepted iff finite and integral (same `rint` test as BIGINT), converted via `BigDecimal.valueOf(d).toBigIntegerExact()`; fractional or non-finite is a mismatch — truncating would disagree with nothing today (DECIMAL is never pushed) but would violate type-exactness, the M1 invariant.
+- `Double` / `Float` → accepted iff finite and integral (`rint` test), converted via `BigDecimal.valueOf(d).toBigIntegerExact()` and then gated on `!Decimals.overflows(bigInteger, 38)` exactly like the `BigInteger` bullet; fractional, non-finite, or overflowing is a mismatch. **Do not reuse `isIntegralInLongRange`'s signed-64-bit bound here** (Opus review B1): it would wrongly null integral doubles in `[2⁶³, 10³⁸)` — e.g. `1e19`, precisely the uint64-range class a `DECIMAL(38,0)` column exists to hold — and without the overflow gate an integral double ≥ 10³⁸ would crash lenient mode via `Int128.valueOf`'s `ArithmeticException` instead of reading as `NULL`. `!overflows(bi, 38)` ⇒ `|bi| < 10³⁸ <` Int128 max, so one gate closes both failure modes.
 
 Scale is always 0, so no rescaling arises.
 
@@ -106,7 +108,9 @@ Scale is always 0, so no rescaling arises.
 - Arrays: homogeneous, empty, nested (`ARRAY(ARRAY(BIGINT))`), leaf mismatch → `[1, NULL, 3]` lenient / raise strict.
 - Rows: full match, absent field → `NULL` in **both** modes, extra document keys ignored, nested row-in-array-in-row.
 - Structural mismatches: scalar under ARRAY column, list under ROW column — whole-value null lenient / raise strict.
-- DECIMAL: `Long`, uint64 `BigInteger` (the real trigger case), integral double, fractional double mismatch, >38-digit `BigInteger` mismatch.
+- DECIMAL: `Long`, uint64 `BigInteger` (the real trigger case), integral double, fractional double mismatch, >38-digit `BigInteger` mismatch; boundary cases guarding B1 — an integral double in `[2⁶³, 10³⁸)` (e.g. `1e19`) **reads back**, and an integral double ≥ 10³⁸ (e.g. `1e39`) is a clean mismatch (lenient `NULL`, no `ArithmeticException`).
+- Nested DECIMAL and scalar leaves: `ARRAY(DECIMAL(38,0))` and `ROW(x DECIMAL(38,0))` materialize through the same dispatch (§5).
+- Stored `null` at depth: `[1, null, 3]` under `ARRAY(BIGINT)` and a null ROW field read as `NULL` in **both** modes — strict does not raise (§3).
 - Strict paths: assert the exact path rendering at depth (`a[2].b`).
 
 **`ArangoConnectorQueryTest` additions (end-to-end SQL, real container):**
@@ -134,4 +138,4 @@ Scale is always 0, so no rescaling arises.
 - `RowBlockBuilder.buildEntry(RowValueBuilder<E>)`; callback `RowValueBuilder.build(List<BlockBuilder>)`.
 - `Int128.valueOf(BigInteger)` / `Int128.valueOf(long)`.
 - `Decimals.overflows(BigInteger, int precision)` (also an `(Int128, int)` overload; the `BigInteger` one is used so the check precedes `Int128.valueOf`, which throws past 128 bits).
-- Long-decimal write path: `DecimalType.writeObject(BlockBuilder, Int128)` (precision 38 > `Decimals.MAX_SHORT_PRECISION` = 18).
+- Long-decimal write path: `Type.writeObject(BlockBuilder, Object)` — there is **no** `Int128`-typed overload on `DecimalType`; the package-private `LongDecimalType` implementation casts the `Object` to `Int128` at runtime (precision 38 > `Decimals.MAX_SHORT_PRECISION` = 18, so DECIMAL(38,0) is always the long-decimal representation).
