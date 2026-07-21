@@ -2,7 +2,9 @@ package io.arango.trino.type;
 
 import io.arango.trino.ArangoConfig;
 import io.trino.spi.TrinoException;
+import io.trino.spi.block.ArrayBlockBuilder;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.BigintType;
 import io.trino.spi.type.BooleanType;
 import io.trino.spi.type.DoubleType;
@@ -11,6 +13,7 @@ import io.trino.spi.type.VarcharType;
 
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.List;
 
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.arango.trino.ArangoErrorCode.ARANGODB_TYPE_CONVERSION_ERROR;
@@ -56,6 +59,18 @@ public class ValueMaterializer {
         }
         if (type instanceof VarcharType && value instanceof String s) {
             type.writeSlice(out, utf8Slice(s));
+            return;
+        }
+        if (type instanceof ArrayType arrayType && value instanceof List<?> list) {
+            ((ArrayBlockBuilder) out).buildEntry(elementBuilder -> {
+                int i = 0;
+                for (Object element : list) {
+                    path.addLast("[" + i + "]");
+                    write(elementBuilder, arrayType.getElementType(), element, columnName);
+                    path.removeLast();
+                    i++;
+                }
+            });
             return;
         }
         mismatch(out, type, value, columnName);

@@ -4,10 +4,13 @@ import io.arango.trino.ArangoConfig;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.Type;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigInteger;
+import java.util.Arrays;
+import java.util.List;
 
 import static io.arango.trino.ArangoConfig.TypeCoercion.LENIENT;
 import static io.arango.trino.ArangoConfig.TypeCoercion.STRICT;
@@ -58,6 +61,68 @@ class ValueMaterializerTest {
                     assertThat(e.getErrorCode().getName()).isEqualTo("ARANGODB_TYPE_CONVERSION_ERROR");
                     // top-level mismatch keeps today's message shape: no path suffix
                     assertThat(e.getMessage()).startsWith("Column 'col' expected");
+                });
+    }
+
+    @Test
+    void arrayOfBigintMaterializes() {
+        ArrayType type = new ArrayType(BIGINT);
+        Block block = materialize(type, List.of(1L, 2L, 3L), LENIENT);
+        Block elements = type.getObject(block, 0);
+        assertThat(elements.getPositionCount()).isEqualTo(3);
+        assertThat(BIGINT.getLong(elements, 0)).isEqualTo(1L);
+        assertThat(BIGINT.getLong(elements, 2)).isEqualTo(3L);
+    }
+
+    @Test
+    void emptyArrayMaterializesEmpty() {
+        ArrayType type = new ArrayType(VARCHAR);
+        assertThat(type.getObject(materialize(type, List.of(), LENIENT), 0).getPositionCount()).isZero();
+    }
+
+    @Test
+    void nestedArrayMaterializesRecursively() {
+        ArrayType inner = new ArrayType(BIGINT);
+        ArrayType type = new ArrayType(inner);
+        Block outer = type.getObject(materialize(type, List.of(List.of(1L), List.of(2L, 3L)), LENIENT), 0);
+        assertThat(outer.getPositionCount()).isEqualTo(2);
+        Block second = inner.getObject(outer, 1);
+        assertThat(BIGINT.getLong(second, 1)).isEqualTo(3L);
+    }
+
+    @Test
+    void arrayLeafMismatchNullsOnlyThatElementUnderLenient() {
+        ArrayType type = new ArrayType(BIGINT);
+        Block elements = type.getObject(materialize(type, List.of(1L, "oops", 3L), LENIENT), 0);
+        assertThat(BIGINT.getLong(elements, 0)).isEqualTo(1L);
+        assertThat(elements.isNull(1)).isTrue();   // leaf-level null (spec §3, user choice A)
+        assertThat(BIGINT.getLong(elements, 2)).isEqualTo(3L);
+    }
+
+    @Test
+    void storedNullElementIsNullInBothModesNeverAMismatch() {
+        ArrayType type = new ArrayType(BIGINT);
+        List<Object> withNull = Arrays.asList(1L, null, 3L);
+        assertThat(type.getObject(materialize(type, withNull, LENIENT), 0).isNull(1)).isTrue();
+        assertThat(type.getObject(materialize(type, withNull, STRICT), 0).isNull(1)).isTrue(); // no raise
+    }
+
+    @Test
+    void scalarUnderArrayColumnIsStructuralMismatch() {
+        ArrayType type = new ArrayType(BIGINT);
+        assertThat(materialize(type, "not-a-list", LENIENT).isNull(0)).isTrue();
+        assertThatThrownBy(() -> materialize(type, "not-a-list", STRICT))
+                .isInstanceOfSatisfying(TrinoException.class,
+                        e -> assertThat(e.getMessage()).startsWith("Column 'col' expected"));
+    }
+
+    @Test
+    void strictNestedMismatchNamesThePath() {
+        ArrayType type = new ArrayType(BIGINT);
+        assertThatThrownBy(() -> materialize(type, List.of(1L, "oops"), STRICT))
+                .isInstanceOfSatisfying(TrinoException.class, e -> {
+                    assertThat(e.getErrorCode().getName()).isEqualTo("ARANGODB_TYPE_CONVERSION_ERROR");
+                    assertThat(e.getMessage()).contains("value at col[1]");
                 });
     }
 }
