@@ -26,6 +26,14 @@ jobs:
           java-version: '24'
           cache: maven
 
+      # Pre-pull the ArangoDB image before the test phase. The M3 cluster ITs boot four
+      # arangod nodes at once; on a cold 2-vCPU runner, pulling and extracting the ~450MB
+      # image while the cluster is trying to form starves coordinator startup and pushed it
+      # past the Testcontainers wait window (the ShardParallel*IT setup timeouts). Warming
+      # the image here means that window is spent on cluster formation alone.
+      - name: Pre-pull ArangoDB image
+        run: docker pull arangodb/arangodb:3.12
+
       # 'verify' runs the full test phase first: the suite is almost entirely
       # Testcontainers-based (a real arangodb/arangodb:3.12 container per test class,
       # plus DistributedQueryRunner end-to-end tests), which needs Docker. It then runs

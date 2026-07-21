@@ -14,15 +14,23 @@ public final class TestingArangoCluster implements AutoCloseable {
         compose = new ComposeContainer(new File("src/test/resources/arangodb-cluster-compose.yml"))
                 .withExposedService("coordinator", 8529,
                         Wait.forHttp("/_api/version").forStatusCode(200)
-                                .withStartupTimeout(Duration.ofMinutes(3)));
-        compose.start();
+                                // A cold ubuntu-latest runner (2 vCPU, image freshly pulled) forms the
+                                // 4-node cluster far slower than a warm local box, where it is ready in
+                                // ~15s; 3 minutes was not enough headroom and timed CI out. 5 minutes
+                                // absorbs the slow cold boot without masking a genuine hang.
+                                .withStartupTimeout(Duration.ofMinutes(5)));
         try {
+            compose.start();
             awaitClusterReady();
         } catch (RuntimeException e) {
-            // Don't leak the compose containers if the cluster never becomes write-ready:
-            // this constructor throwing means the instance is never assigned, so close()
-            // never runs, and the containers would otherwise sit until Ryuk reaps them
-            // (or trip the test framework's leaked-container JVM-kill safeguard).
+            // Don't leak the compose containers if the cluster never comes up. Either a
+            // start() timeout in the HTTP wait strategy or a write-readiness failure below
+            // throws before this instance is assigned, so close() never runs. Left running,
+            // the containers -- including Testcontainers' socat port ambassador -- sit until
+            // the leaked-container safeguard hard-kills the JVM fork (turning one clean IT
+            // failure into an unreadable "forked VM terminated without properly saying
+            // goodbye" crash) and starve the next IT's cluster boot. start() must be inside
+            // this try for stop() to cover the start()-timeout case, not just readiness.
             compose.stop();
             throw e;
         }
