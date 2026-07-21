@@ -36,11 +36,15 @@ import static java.util.Objects.requireNonNull;
  */
 public class ValueMaterializer {
     private final ArangoConfig.TypeCoercion coercion;
-    // Segments of the in-flight recursion ("[2]", ".b"); rendered only when STRICT raises.
+    private final boolean strict;
+    // Segments of the in-flight recursion ("[2]", ".b"); rendered only when STRICT raises. Only
+    // maintained under STRICT -- LENIENT never reads it, so the push/pop and segment string are
+    // skipped entirely on the common path (LENIENT is the default).
     private final Deque<String> path = new ArrayDeque<>();
 
     public ValueMaterializer(ArangoConfig.TypeCoercion coercion) {
         this.coercion = requireNonNull(coercion, "coercion is null");
+        this.strict = coercion == ArangoConfig.TypeCoercion.STRICT;
     }
 
     public void writeValue(BlockBuilder out, Type type, Object value, String columnName) {
@@ -73,9 +77,9 @@ public class ValueMaterializer {
             ((ArrayBlockBuilder) out).buildEntry(elementBuilder -> {
                 int i = 0;
                 for (Object element : list) {
-                    path.addLast("[" + i + "]");
+                    if (strict) path.addLast("[" + i + "]");
                     write(elementBuilder, arrayType.getElementType(), element, columnName);
-                    path.removeLast();
+                    if (strict) path.removeLast();
                     i++;
                 }
             });
@@ -90,9 +94,9 @@ public class ValueMaterializer {
                     // assumption TypeMapper.mergeRows makes. An absent key reads as null in
                     // both modes: the union schema makes absence routine (spec decision 4).
                     String name = field.getName().orElseThrow();
-                    path.addLast("." + name);
+                    if (strict) path.addLast("." + name);
                     write(fieldBuilders.get(i), field.getType(), map.get(name), columnName);
-                    path.removeLast();
+                    if (strict) path.removeLast();
                 }
             });
             return;
