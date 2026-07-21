@@ -338,9 +338,10 @@ Credentials should be supplied via Trino's secrets support, not inline.
 | **M1** | Read skeleton | Plugin/Factory/Connector/Metadata; DB/collection listing (lazy, fault-tolerant); merge-sampling schema; single-split full scan; base + widening type mapping; coercion policy | `SELECT *` returns correct rows/types; `SHOW TABLES` tolerates unresolvable collections |
 | **M2** | Filter + limit + projection pushdown | `applyFilter` **with type/null guards**, `applyLimit` (single-split guarantee rule), `applyProjection` (nested) | `isFullyPushedDown()` for guarded predicates; mixed-type filter returns SQL-correct rows |
 | **M3** | Shard-parallel splits | Shard discovery; `shardIds` execution; version pin + capability check + CI count-sum gate + single-split fallback; SmartGraph exclusion | N shards ⇒ N splits, counts sum exactly; fallback proven |
-| **M4** | Aggregation pushdown | `applyAggregation` → **single-split** COUNT/SUM/MIN/MAX/AVG + GROUP BY | Aggregates correct vs reference; aggregated handle = 1 split |
-| **M5** | Schema sources + `query()` + stats | override reader (`trino_schema`); validation-rule hint+merge; `ArangoQueryFunction` (AST read-only check, k-row schema, disable flag); `getTableStatistics` | Precedence honored; graph reachable via `query()`; row-count stats surfaced |
-| **M6** | Hardening | TLS/auth, secrets, case-insensitive matching, cursor/failover resilience, best-effort dynamic filtering, `BaseConnectorTest` conformance, docs | Conformance green; deployment guide published |
+| **M4** | Structured-type materialization *(inserted 2026-07-21; later rows renumbered — docs dated earlier reference the old numbers)* | Recursive ARRAY/ROW/DECIMAL(38,0) value materialization (`ValueMaterializer`); leaf-level mismatch semantics; `checkMaterializable` removed | `SELECT` of any inferred column returns correct values; leaf semantics proven under both coercion modes |
+| **M5** | Aggregation pushdown | `applyAggregation` → **single-split** COUNT/SUM/MIN/MAX/AVG + GROUP BY | Aggregates correct vs reference; aggregated handle = 1 split |
+| **M6** | Schema sources + `query()` + stats | override reader (`trino_schema`); validation-rule hint+merge; `ArangoQueryFunction` (AST read-only check, k-row schema, disable flag); `getTableStatistics` | Precedence honored; graph reachable via `query()`; row-count stats surfaced |
+| **M7** | Hardening | TLS/auth, secrets, case-insensitive matching, cursor/failover resilience, best-effort dynamic filtering, `BaseConnectorTest` conformance, docs | Conformance green; deployment guide published |
 
 ---
 

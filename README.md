@@ -7,9 +7,8 @@ ArangoDB **databases map to Trino schemas** and **collections map to tables**; s
 inferred by sampling documents. The connector is currently **read-only**, with equality/IN
 filter pushdown for all scalar types, guarded numeric range pushdown, and `LIMIT` pushdown.
 
-> **Status.** Milestones **M1** ("read skeleton"), **M2** ("filter-pushdown completion"), and
-> **M3** ("shard-parallel splits") are complete. Writes (`INSERT`/`DELETE`) and value
-> materialization for `ARRAY`/`ROW`/`DECIMAL` are out of scope so far — see
+> **Status.** Milestones **M1**–**M4** are complete (**M4**: `ARRAY`/`ROW`/`DECIMAL` value
+> materialization). Writes (`INSERT`/`DELETE`) are out of scope so far — see
 > [Limitations](#limitations).
 
 ## Requirements
@@ -86,15 +85,17 @@ and takes the **union of fields**, merging each field's observed types:
 | Integer beyond signed 64-bit / `uint64` | `DECIMAL(38,0)` |
 | Other number (fractional / floating point) | `DOUBLE` |
 | String | `VARCHAR` |
-| Array | `ARRAY(...)` *(schema only — not yet materializable)* |
-| Object | `ROW(...)` *(schema only — not yet materializable)* |
+| Array | `ARRAY(...)` (values materialize recursively) |
+| Object | `ROW(...)` (values materialize recursively) |
 | Field seen only as `null` | `VARCHAR` |
 | Field with incompatible mixed types | `VARCHAR` (per `mixed-type-strategy`) |
 
 Merging an integer-typed and a floating-point occurrence of the same field **widens to
 `DOUBLE`**. `ARRAY`/`ROW`/`DECIMAL` columns are inferred and shown by `DESCRIBE`/`SHOW COLUMNS`,
-but selecting their **values** raises `NOT_SUPPORTED` until a later milestone (see
-[Limitations](#limitations)).
+and (since M4) selecting their **values** materializes them recursively: under
+`arangodb.type-coercion=lenient` a type-mismatched leaf reads as `NULL` (only that element/field,
+not the whole row), while `strict` raises `ARANGODB_TYPE_CONVERSION_ERROR` with a path to the
+offending leaf (e.g. `col[2].b`).
 
 ## Sharding / parallelism
 
@@ -177,9 +178,6 @@ pushdown safe — the pushed AQL and the reader agree on exactly which values qu
 ## Limitations
 
 - **Read-only** — no `INSERT`/`UPDATE`/`DELETE`.
-- **`ARRAY` / `ROW` / `DECIMAL` values are not materializable yet** — such columns appear in the
-  schema, but projecting them raises `NOT_SUPPORTED`. Filtering/selecting other columns of the
-  same table is unaffected.
 - **Shard-parallel fan-out is narrow by design** — only non-smart, multi-shard hash collections on
   a cluster get more than one split; SmartGraph/SmartJoin collections, satellite collections, and
   single-server deployments always scan as a single split. See
