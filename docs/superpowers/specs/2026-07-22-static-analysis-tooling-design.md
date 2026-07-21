@@ -1,5 +1,16 @@
 # Static analysis & pre-commit tooling: design
 
+**Status:** implemented 2026-07-22.
+
+**As-built deviations from this design (§5/§6):**
+- **No source fixes; existing findings grandfathered instead.** §5 planned to *fix* genuine findings (unused imports, star imports, etc.) in the M1–M3 code. In practice the Spotless ratchet is *file-granular*, so touching any existing file to fix a finding subjects the whole file to a google-java-format reflow (measured: ~170 lines changed on a single file). That is exactly the disruptive reformat the ratchet exists to avoid, so all pre-existing Checkstyle/SpotBugs findings are **grandfathered** with documented, narrowly-scoped suppressions and the gates enforce on new/changed code going forward — the same posture as the Spotless ratchet. Zero `src/**/*.java` files were modified.
+- **google-java-format uses AOSP style (4-space)**, not default 2-space, to match the existing indentation and keep future reflows minimal.
+- **NeedBraces dropped** from the Checkstyle ruleset (low-signal here; google-java-format does not add braces, so the tools could not converge without a manual reflow).
+- **Tool version floors raised for JDK 25**: google-java-format 1.35 / SpotBugs 4.10 / Spotless 3.x — older versions break on a JDK-25 toolchain (javac-internals API change; ASM too old for class-file v69) even though CI pins JDK 24.
+- **SpotBugs EI_EXPOSE_REP/REP2 and CT_CONSTRUCTOR_THROW excluded project-wide** (matches Trino): injected singletons are meant to be shared and fail-fast constructor validation is idiomatic — these are noise for the whole codebase, not just existing code.
+
+---
+
 **Status:** design (approved in-session 2026-07-22).
 **Goal:** Add an industry-standard, high-signal static-analysis and pre-commit stack to the repo without a disruptive one-time reformat and without touching the deliberately-pinned dependency versions in `pom.xml`.
 

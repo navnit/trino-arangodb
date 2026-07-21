@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<!DOCTYPE suppressions PUBLIC
+        "-//Checkstyle//DTD SuppressionFilter Configuration 1.2//EN"
+        "https://checkstyle.org/dtds/suppressions_1_2.dtd">
+
+<!--
+  Documented Checkstyle suppressions. Every entry must carry a reason: a
+  suppression without a rationale is a silenced bug, not a triaged one.
+-->
+<suppressions>
+    <!-- Verbatim Apache-2.0 relocation of Trino's own io.trino.type.UnknownType
+         (see the class Javadoc and NOTICE). It is copied unchanged on purpose, so
+         it is exempt from this repo's conventions. -->
+    <suppress files="[/\\]type[/\\]UnknownType\.java$" checks=".*"/>
+
+    <!-- Grandfathered M1-M3 findings. These files predate the static-analysis gate and
+         are held to it going forward on any *changed* file, mirroring the Spotless
+         ratchet (which likewise leaves existing files untouched). Fixing them in place
+         is not viable: the ratchet is file-granular, so touching a file to expand a
+         star import or drop a dead import would subject the whole file to a
+         google-java-format reflow (~170 lines on a single file, measured), disturbing
+         the deliberately hand-tuned Trino-style layout the design set out to preserve.
+         Each entry is scoped to the single offending check, not the whole file. -->
+    <suppress files="[/\\]ArangoConnector\.java$" checks="AvoidStarImport"/>
+    <suppress files="[/\\]ArangoMetadata\.java$" checks="AvoidStarImport"/>
+    <suppress files="[/\\]ArangoPageSourceProvider\.java$" checks="AvoidStarImport"/>
+    <suppress files="[/\\]ArangoPageSource\.java$" checks="AvoidStarImport"/>
+    <suppress files="[/\\]SchemaResolverTest\.java$" checks="AvoidStarImport"/>
+    <suppress files="[/\\]ArangoConnectorQueryTest\.java$" checks="AvoidStarImport"/>
+    <suppress files="[/\\]ArangoMetadataTest\.java$" checks="UnusedImports"/>
+    <suppress files="[/\\]ShardParallelCorrectnessIT\.java$" checks="UnusedImports"/>
+</suppressions>

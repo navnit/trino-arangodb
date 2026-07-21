@@ -1,0 +1,67 @@
+<?xml version="1.0"?>
+<!DOCTYPE module PUBLIC
+        "-//Checkstyle//DTD Checkstyle Configuration 1.3//EN"
+        "https://checkstyle.org/dtds/configuration_1_3.dtd">
+
+<!--
+  Semantic-convention ruleset (Trino-derived, deliberately narrow).
+
+  This checks ONLY the conventions a formatter cannot: import hygiene, naming,
+  required @Override, equals/hashCode pairing, empty blocks and missing braces.
+  Pure-formatting checks (LineLength, Indentation, whitespace, wrapping) are
+  intentionally omitted so Checkstyle never fights google-java-format (Spotless).
+  Keep this set narrow: broadening it re-imports the formatting overlap the
+  Spotless ratchet exists to avoid.
+-->
+<module name="Checker">
+    <property name="charset" value="UTF-8"/>
+    <property name="severity" value="error"/>
+    <property name="fileExtensions" value="java"/>
+
+    <!-- Suppress findings listed in suppressions.xml (e.g. the verbatim UnknownType
+         relocation). The path comes from the plugin's <suppressionsLocation>, exposed
+         as the checkstyle.suppressions.file property. -->
+    <module name="SuppressionFilter">
+        <property name="file" value="${checkstyle.suppressions.file}"/>
+        <property name="optional" value="false"/>
+    </module>
+
+    <module name="TreeWalker">
+        <!-- Import hygiene. -->
+        <module name="AvoidStarImport"/>
+        <module name="RedundantImport"/>
+        <module name="UnusedImports">
+            <property name="processJavadoc" value="true"/>
+        </module>
+
+        <!-- Naming conventions. ConstantName's format additionally allows the lowercase
+             'log' logger field, which is the airlift/Trino idiom this codebase follows
+             (private static final Logger log = Logger.get(...)). -->
+        <module name="PackageName"/>
+        <module name="TypeName"/>
+        <module name="MethodName"/>
+        <module name="MemberName"/>
+        <module name="ParameterName"/>
+        <module name="LocalVariableName"/>
+        <module name="LocalFinalVariableName"/>
+        <module name="ConstantName">
+            <property name="format" value="^(log|[A-Z][A-Z0-9]*(_[A-Z0-9]+)*)$"/>
+        </module>
+        <module name="StaticVariableName"/>
+
+        <!-- Correctness conventions: required @Override, equals/hashCode pairing, empty
+             blocks. NeedBraces is deliberately omitted: the existing code follows the
+             Trino idiom of single-line guard clauses without braces, google-java-format
+             does not add braces (so the two tools couldn't converge without a manual
+             reflow of every touched file), and the check is low-signal here — it earns
+             its place least of the set the design named. -->
+        <module name="MissingOverride"/>
+        <module name="EqualsHashCode"/>
+        <module name="EmptyBlock">
+            <property name="option" value="text"/>
+            <property name="tokens"
+                      value="LITERAL_TRY, LITERAL_FINALLY, LITERAL_IF, LITERAL_ELSE,
+                             LITERAL_FOR, LITERAL_WHILE, LITERAL_DO, LITERAL_SWITCH"/>
+        </module>
+    </module>
+</module>

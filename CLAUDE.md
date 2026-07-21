@@ -25,7 +25,23 @@ mvn test -Dtest=TypeMapperTest#mergeIntAndFloatWidensToDouble   # single test me
 
 Most test classes (`ArangoClientTest`, `ArangoConnectorQueryTest`, `ArangoPageSourceProviderTest`, and others using `TestingArangoServer`) spin up a real ArangoDB container via Testcontainers — **Docker must be running locally** for `mvn test` to pass. No mocking framework is used anywhere in the test suite; where a test does need to avoid hitting a live server (e.g. `ArangoMetadataTest`'s error-path cases), it uses hand-written `ArangoClient` subclasses as test doubles rather than a container. End-to-end SQL queries run against a live container via Trino's `DistributedQueryRunner` (see `ArangoConnectorQueryTest`).
 
-There is no linter/formatter plugin configured in `pom.xml`.
+### Static analysis
+
+The build wires a Docker-free static-analysis stack (all three gates also bind to `verify`, and CI runs them as a separate fast job):
+
+```bash
+mvn spotless:check      # google-java-format (AOSP/4-space), ratcheted to origin/master
+mvn spotless:apply      # auto-fix formatting on changed files
+mvn checkstyle:check    # semantic conventions (imports, naming, @Override, equals/hashCode, empty blocks)
+mvn compile spotbugs:check   # bytecode bug patterns + FindSecBugs (needs compiled classes)
+```
+
+Key design points (full rationale in `docs/superpowers/specs/2026-07-22-static-analysis-tooling-design.md`):
+
+- **Spotless is ratcheted** (`ratchetFrom=origin/master`): it enforces formatting only on files changed vs `master`, so the hand-tuned M1–M3 source is untouched. It uses google-java-format's **AOSP style (4-space)** to match the existing indentation — default GJF is 2-space and would reindent every touched file.
+- **Checkstyle and SpotBugs findings on the pre-existing M1–M3 code are grandfathered**, mirroring the ratchet: existing files are suppressed (`config/checkstyle/suppressions.xml`, `config/spotbugs/spotbugs-exclude.xml`, each entry with a documented reason), and the gates enforce on new/changed code going forward. Fixing them in place is not viable because the ratchet is file-granular, so any edit would trigger a full-file GJF reflow.
+- Tool version floors (google-java-format 1.35, SpotBugs 4.10, Spotless 3.x) exist for **JDK 25 support**: older versions call javac internals / bundle an ASM that break on a JDK-25 toolchain even though CI pins JDK 24.
+- Optional local git hooks live in `.pre-commit-config.yaml` (`pre-commit install`); Dependabot config in `.github/dependabot.yml`.
 
 ### pom.xml is a standalone module with no parent POM
 
