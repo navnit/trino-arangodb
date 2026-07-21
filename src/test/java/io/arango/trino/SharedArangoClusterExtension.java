@@ -31,10 +31,22 @@ public final class SharedArangoClusterExtension implements BeforeAllCallback {
     private static final String KEY = "cluster";
 
     private static volatile TestingArangoCluster cluster;
+    // A boot failure is cached and rethrown for every later IT instead of re-attempting a fresh
+    // boot. On a resource-starved runner the first boot can time out; without this, the next
+    // extended IT sees cluster==null and boots a SECOND full cluster (the "fatal second boot"
+    // this whole extension exists to avoid), doubling the wasted wait and the failure noise.
+    // At most one cluster boot happens per JVM, whatever its outcome.
+    private static volatile RuntimeException bootFailure;
 
     @Override
     public synchronized void beforeAll(ExtensionContext context) {
-        if (cluster == null) {
+        if (cluster != null) {
+            return; // already booted; reuse
+        }
+        if (bootFailure != null) {
+            throw bootFailure; // first boot already failed -- fail fast, do not re-boot
+        }
+        try {
             TestingArangoCluster started = new TestingArangoCluster();
             // Register the stop on the ROOT store so JUnit closes it at end of the test plan
             // (before ReportLeakedContainers runs); publish the field only after a successful
@@ -42,6 +54,9 @@ public final class SharedArangoClusterExtension implements BeforeAllCallback {
             context.getRoot().getStore(NAMESPACE)
                     .put(KEY, (ExtensionContext.Store.CloseableResource) started::close);
             cluster = started;
+        } catch (RuntimeException e) {
+            bootFailure = e;
+            throw e;
         }
     }
 

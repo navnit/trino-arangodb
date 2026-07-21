@@ -8,6 +8,19 @@ services:
       --server.endpoint=tcp://0.0.0.0:8531
       --agency.my-address=tcp://agency:8531 --agency.endpoint=tcp://agency:8531
       --agency.activate=true --agency.size=1 --agency.supervision=true
+  # One dbserver is enough: the shard-parallel ITs need a collection with >1 *shard*
+  # (numberOfShards=3, replicationFactor defaults to 1), and three shards live fine on a
+  # single PRIMARY. A second dbserver only doubled the boot footprint on GitHub's 2-vCPU
+  # runner, where the extra JVM tipped the cold cluster boot past the wait window and timed
+  # CI out. Per-shard `shardIds` scanning and the count-sum correctness proof are unaffected
+  # by how many servers host the shards.
+  #
+  # --cluster.system-replication-factor=1 on the coordinator is REQUIRED for a single-dbserver
+  # cluster: ArangoDB 3.12 creates its _system collections at replicationFactor 2 by default,
+  # and with one dbserver that bootstrap step loops forever ("number of current DB-Servers is
+  # lower than the requested replicationFactor/writeConcern"), so the coordinator never leaves
+  # maintenance mode and /_api/version 503s until the wait times out. Forcing 1 lets the single
+  # dbserver satisfy it.
   dbserver1:
     image: arangodb/arangodb:3.12
     environment:
@@ -16,16 +29,6 @@ services:
       arangod --server.authentication=false
       --server.endpoint=tcp://0.0.0.0:8530
       --cluster.my-address=tcp://dbserver1:8530 --cluster.my-role=PRIMARY
-      --cluster.agency-endpoint=tcp://agency:8531
-    depends_on: [agency]
-  dbserver2:
-    image: arangodb/arangodb:3.12
-    environment:
-      ARANGO_NO_AUTH: "1"
-    command: >
-      arangod --server.authentication=false
-      --server.endpoint=tcp://0.0.0.0:8530
-      --cluster.my-address=tcp://dbserver2:8530 --cluster.my-role=PRIMARY
       --cluster.agency-endpoint=tcp://agency:8531
     depends_on: [agency]
   coordinator:
@@ -37,5 +40,6 @@ services:
       --server.endpoint=tcp://0.0.0.0:8529
       --cluster.my-address=tcp://coordinator:8529 --cluster.my-role=COORDINATOR
       --cluster.agency-endpoint=tcp://agency:8531
+      --cluster.system-replication-factor=1
     ports: ["8529"]
-    depends_on: [agency, dbserver1, dbserver2]
+    depends_on: [agency, dbserver1]
