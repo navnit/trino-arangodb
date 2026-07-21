@@ -4,16 +4,19 @@ import io.arango.trino.ArangoConfig;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.ArrayBlockBuilder;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.RowBlockBuilder;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.BigintType;
 import io.trino.spi.type.BooleanType;
 import io.trino.spi.type.DoubleType;
+import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
 
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.List;
+import java.util.Map;
 
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.arango.trino.ArangoErrorCode.ARANGODB_TYPE_CONVERSION_ERROR;
@@ -69,6 +72,22 @@ public class ValueMaterializer {
                     write(elementBuilder, arrayType.getElementType(), element, columnName);
                     path.removeLast();
                     i++;
+                }
+            });
+            return;
+        }
+        if (type instanceof RowType rowType && value instanceof Map<?, ?> map) {
+            ((RowBlockBuilder) out).buildEntry(fieldBuilders -> {
+                List<RowType.Field> fields = rowType.getFields();
+                for (int i = 0; i < fields.size(); i++) {
+                    RowType.Field field = fields.get(i);
+                    // Inference always names fields (RowType.field(name, type)) -- same
+                    // assumption TypeMapper.mergeRows makes. An absent key reads as null in
+                    // both modes: the union schema makes absence routine (spec decision 4).
+                    String name = field.getName().orElseThrow();
+                    path.addLast("." + name);
+                    write(fieldBuilders.get(i), field.getType(), map.get(name), columnName);
+                    path.removeLast();
                 }
             });
             return;

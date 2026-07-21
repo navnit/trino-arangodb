@@ -4,13 +4,16 @@ import io.arango.trino.ArangoConfig;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.SqlRow;
 import io.trino.spi.type.ArrayType;
+import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigInteger;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 
 import static io.arango.trino.ArangoConfig.TypeCoercion.LENIENT;
 import static io.arango.trino.ArangoConfig.TypeCoercion.STRICT;
@@ -22,6 +25,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ValueMaterializerTest {
+
+    private static final RowType ADDRESS = RowType.rowType(
+            RowType.field("city", VARCHAR), RowType.field("zip", BIGINT));
 
     // Writes one value through ValueMaterializer and returns the built single-position block.
     static Block materialize(Type type, Object value, ArangoConfig.TypeCoercion coercion) {
@@ -78,6 +84,7 @@ class ValueMaterializerTest {
     void emptyArrayMaterializesEmpty() {
         ArrayType type = new ArrayType(VARCHAR);
         assertThat(type.getObject(materialize(type, List.of(), LENIENT), 0).getPositionCount()).isZero();
+        assertThat(materialize(type, List.of(), LENIENT).isNull(0)).isFalse();
     }
 
     @Test
@@ -124,5 +131,54 @@ class ValueMaterializerTest {
                     assertThat(e.getErrorCode().getName()).isEqualTo("ARANGODB_TYPE_CONVERSION_ERROR");
                     assertThat(e.getMessage()).contains("value at col[1]");
                 });
+    }
+
+    @Test
+    void rowMaterializesFieldsInRowTypeOrder() {
+        SqlRow row = ADDRESS.getObject(materialize(ADDRESS, Map.of("zip", 10115L, "city", "berlin"), LENIENT), 0);
+        assertThat(VARCHAR.getSlice(row.getRawFieldBlock(0), row.getRawIndex()).toStringUtf8()).isEqualTo("berlin");
+        assertThat(BIGINT.getLong(row.getRawFieldBlock(1), row.getRawIndex())).isEqualTo(10115L);
+    }
+
+    @Test
+    void absentRowFieldIsNullInBothModesNeverAMismatch() {
+        Map<String, Object> cityOnly = Map.of("city", "berlin"); // no "zip" key at all
+        SqlRow lenient = ADDRESS.getObject(materialize(ADDRESS, cityOnly, LENIENT), 0);
+        assertThat(lenient.getRawFieldBlock(1).isNull(lenient.getRawIndex())).isTrue();
+        SqlRow strict = ADDRESS.getObject(materialize(ADDRESS, cityOnly, STRICT), 0); // no raise
+        assertThat(strict.getRawFieldBlock(1).isNull(strict.getRawIndex())).isTrue();
+    }
+
+    @Test
+    void extraDocumentKeysAreIgnored() {
+        SqlRow row = ADDRESS.getObject(materialize(ADDRESS,
+                Map.of("city", "berlin", "zip", 10115L, "unsampled", true), LENIENT), 0);
+        assertThat(row.getFieldCount()).isEqualTo(2);
+    }
+
+    @Test
+    void listUnderRowColumnIsStructuralMismatch() {
+        assertThat(materialize(ADDRESS, List.of("berlin"), LENIENT).isNull(0)).isTrue();
+    }
+
+    @Test
+    void rowInArrayInRowMaterializes() {
+        RowType leaf = RowType.rowType(RowType.field("v", BIGINT));
+        RowType root = RowType.rowType(RowType.field("items", new ArrayType(leaf)));
+        Block block = materialize(root, Map.of("items", List.of(Map.of("v", 7L))), LENIENT);
+        SqlRow rootRow = root.getObject(block, 0);
+        Block items = new ArrayType(leaf).getObject(rootRow.getRawFieldBlock(0), rootRow.getRawIndex());
+        SqlRow leafRow = leaf.getObject(items, 0);
+        assertThat(BIGINT.getLong(leafRow.getRawFieldBlock(0), leafRow.getRawIndex())).isEqualTo(7L);
+    }
+
+    @Test
+    void strictMismatchInsideArrayOfRowsNamesTheFullPath() {
+        RowType leaf = RowType.rowType(RowType.field("b", BIGINT));
+        ArrayType type = new ArrayType(leaf);
+        List<Object> value = List.of(Map.of("b", 1L), Map.of("b", "oops"), Map.of("b", 3L));
+        assertThatThrownBy(() -> materialize(type, value, STRICT))
+                .isInstanceOfSatisfying(TrinoException.class,
+                        e -> assertThat(e.getMessage()).contains("value at col[1].b")); // spec §7 shape
     }
 }
