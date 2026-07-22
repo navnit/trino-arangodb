@@ -10,6 +10,19 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 10
+    # These groups are version-LOCKED to io.trino:trino-root's BOM: they mirror the exact
+    # io.airlift / jackson / opentelemetry versions trino-spi:${dep.trino.version} was built
+    # and tested against. This standalone pom has no trino parent to inherit that pinning, so
+    # it hardcodes those versions (see the rationale comments in pom.xml). They must move only
+    # when dep.trino.version moves — a "latest" bump diverges from Trino's tested graph and
+    # reintroduces the mediation skew the pins prevent. Dependabot re-proposed these repeatedly
+    # despite being closed each time (airlift #15/#18/#26, opentelemetry #20, jackson #22), so
+    # ignore them here. dep.trino.version itself is intentionally NOT ignored: a Trino bump is a
+    # deliberate migration (it drives all of these) and its PR is a useful signal to act on.
+    ignore:
+      - dependency-name: "io.airlift:*"
+      - dependency-name: "io.opentelemetry:*"
+      - dependency-name: "com.fasterxml.jackson.core:jackson-annotations"
 
   - package-ecosystem: "github-actions"
     directory: "/"
