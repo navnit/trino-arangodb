@@ -54,9 +54,9 @@ import io.trino.spi.type.TypeOperators;
  * <p>This file is a copy of Trino 483's {@code io.trino.type.UnknownType} (Apache License 2.0) —
  * its class body is byte-identical to upstream, reformatted only to this project's
  * google-java-format style — relocated into this package so it is loadable purely from {@code
- * trino-spi} + guava (both already dependencies here). Behavior, including the {@link #UNKNOWN} singleton and its {@code
- * equals}/{@code hashCode} semantics (inherited from {@link AbstractType}, keyed on class + {@link
- * TypeDescriptor}), is unchanged from upstream.
+ * trino-spi} + guava (both already dependencies here). Behavior, including the {@link #UNKNOWN}
+ * singleton and its {@code equals}/{@code hashCode} semantics (inherited from {@link AbstractType},
+ * keyed on class + {@link TypeDescriptor}), is unchanged from upstream.
  */
 public final class UnknownType extends AbstractType implements FixedWidthType {
     private static final TypeOperatorDeclaration TYPE_OPERATOR_DECLARATION =
