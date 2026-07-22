@@ -20,7 +20,7 @@ jobs:
 
       # maven.compiler.release=24 in pom.xml requires a JDK >= 24.
       - name: Set up JDK 24
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '24'
@@ -83,7 +83,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up JDK 24
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '24'
@@ -122,7 +122,7 @@ jobs:
       # versions (google-java-format 1.35, SpotBugs 4.10) also run on JDK 25 for
       # contributors, but CI standardises on 24.
       - name: Set up JDK 24
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '24'
