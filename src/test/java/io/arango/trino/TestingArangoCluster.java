@@ -1,28 +1,49 @@
 package io.arango.trino;
 
 import io.arango.trino.client.ArangoClient;
-import org.testcontainers.containers.ComposeContainer;
-import org.testcontainers.containers.wait.strategy.Wait;
-
 import java.io.File;
 import java.time.Duration;
+import org.testcontainers.containers.ComposeContainer;
+import org.testcontainers.containers.wait.strategy.Wait;
 
 public final class TestingArangoCluster implements AutoCloseable {
     private final ComposeContainer compose;
 
     public TestingArangoCluster() {
-        compose = new ComposeContainer(new File("src/test/resources/arangodb-cluster-compose.yml"))
-                .withExposedService("coordinator", 8529,
-                        Wait.forHttp("/_api/version").forStatusCode(200)
-                                // A cold ubuntu-latest runner (2 vCPU, image freshly pulled) forms the
-                                // 3-node cluster (agency + one dbserver + coordinator) far slower than a
-                                // warm local box, where it is ready in ~15-30s. These ITs are @Tag("cluster")
-                                // and run only in the isolated, non-blocking cluster-its CI job (surefire
-                                // skipped, so the runner is uncontended and boots exactly one cluster), which
-                                // affords a generous 8-minute window; below that the 2-vCPU runner repeatedly
-                                // timed the boot out. 8 minutes absorbs the slow cold boot without masking a
-                                // genuine hang (the job also has its own 25-minute ceiling).
-                                .withStartupTimeout(Duration.ofMinutes(8)));
+        compose =
+                new ComposeContainer(new File("src/test/resources/arangodb-cluster-compose.yml"))
+                        .withExposedService(
+                                "coordinator",
+                                8529,
+                                Wait.forHttp("/_api/version")
+                                        .forStatusCode(200)
+                                        // A cold ubuntu-latest runner (2 vCPU, image freshly
+                                        // pulled) forms the
+                                        // 3-node cluster (agency + one dbserver + coordinator) far
+                                        // slower than a
+                                        // warm local box, where it is ready in ~15-90s. These ITs
+                                        // are @Tag("cluster")
+                                        // and run only in the isolated, non-blocking cluster-its CI
+                                        // job (surefire
+                                        // skipped, so the runner is uncontended and boots exactly
+                                        // one cluster).
+                                        // Formation is CPU/coordination-bound, not memory-bound
+                                        // (measured: the three
+                                        // arangod containers peak at ~500MB total and are never
+                                        // OOM-killed), so on the
+                                        // 2-vCPU runner the wall-clock is what bites. The window
+                                        // was 8 minutes through
+                                        // the trino-476/JDK-24 line, but the JDK-25/trino-483
+                                        // baseline made the forked
+                                        // failsafe JVM heavier and consistently tipped the boot
+                                        // past 8 minutes on CI
+                                        // (the coordinator's /_api/version returned "read timed
+                                        // out" for the full
+                                        // window). 15 minutes absorbs the slower cold boot without
+                                        // masking a genuine
+                                        // hang; the job's own 30-minute ceiling still backstops a
+                                        // true hang.
+                                        .withStartupTimeout(Duration.ofMinutes(15)));
         try {
             compose.start();
             awaitClusterReady();
@@ -41,14 +62,14 @@ public final class TestingArangoCluster implements AutoCloseable {
     }
 
     /**
-     * The coordinator's plain-HTTP {@code /_api/version} answers, and even a metadata GET
-     * succeeds, well before the cluster can actually service *writes*: creating a database is
-     * a coordinated agency transaction, and issuing one immediately after {@link ComposeContainer}'s
-     * (GET-based) wait strategy passes fails with a Vertx "Stream was closed" error -- the
-     * coordinator is up but not yet wired to the agency/dbservers for write coordination.
-     * Retry an actual write (the same call path {@code createDatabaseForTest} exercises) until
-     * it succeeds, so callers of {@link #config()} always get a cluster that can serve writes,
-     * not just accept TCP connections or answer reads.
+     * The coordinator's plain-HTTP {@code /_api/version} answers, and even a metadata GET succeeds,
+     * well before the cluster can actually service *writes*: creating a database is a coordinated
+     * agency transaction, and issuing one immediately after {@link ComposeContainer}'s (GET-based)
+     * wait strategy passes fails with a Vertx "Stream was closed" error -- the coordinator is up
+     * but not yet wired to the agency/dbservers for write coordination. Retry an actual write (the
+     * same call path {@code createDatabaseForTest} exercises) until it succeeds, so callers of
+     * {@link #config()} always get a cluster that can serve writes, not just accept TCP connections
+     * or answer reads.
      */
     private void awaitClusterReady() {
         long deadlineNanos = System.nanoTime() + Duration.ofMinutes(3).toNanos();
@@ -63,11 +84,14 @@ public final class TestingArangoCluster implements AutoCloseable {
                     Thread.sleep(1000);
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
-                    throw new IllegalStateException("Interrupted while waiting for cluster readiness", ie);
+                    throw new IllegalStateException(
+                            "Interrupted while waiting for cluster readiness", ie);
                 }
             }
         }
-        throw new IllegalStateException("ArangoDB cluster did not become write-ready within 3 minutes of boot", lastFailure);
+        throw new IllegalStateException(
+                "ArangoDB cluster did not become write-ready within 3 minutes of boot",
+                lastFailure);
     }
 
     public ArangoConfig config() {

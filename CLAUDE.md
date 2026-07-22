@@ -14,7 +14,7 @@ Maven is not on `PATH` by default in this environment; if `mvn` reports "command
 source ~/.sdkman/bin/sdkman-init.sh
 ```
 
-Build requires Java 24 (`maven.compiler.release=24` in `pom.xml`).
+Build requires Java 25 (`maven.compiler.release=25` in `pom.xml`) — the project tracks Trino 483 (`dep.trino.version`), whose artifacts (`trino-spi`, `io.airlift:*` at 439) ship Java-25 bytecode. The surefire `argLine` carries two Trino-483/JDK-25-mandatory flags: `--add-modules=jdk.incubator.vector` (trino-spi's `BlockEncodingSimdSupport` statically initializes `jdk.incubator.vector.VectorShape`) and `--sun-misc-unsafe-memory-access=allow`.
 
 ```bash
 mvn package                          # build the trino-plugin artifact
@@ -40,7 +40,7 @@ Key design points (full rationale in `docs/superpowers/specs/2026-07-22-static-a
 
 - **Spotless is ratcheted** (`ratchetFrom=origin/master`): it enforces formatting only on files changed vs `master`, so the hand-tuned M1–M3 source is untouched. It uses google-java-format's **AOSP style (4-space)** to match the existing indentation — default GJF is 2-space and would reindent every touched file.
 - **Checkstyle and SpotBugs findings on the pre-existing M1–M3 code are grandfathered**, mirroring the ratchet: existing files are suppressed (`config/checkstyle/suppressions.xml`, `config/spotbugs/spotbugs-exclude.xml`, each entry with a documented reason), and the gates enforce on new/changed code going forward. Fixing them in place is not viable because the ratchet is file-granular, so any edit would trigger a full-file GJF reflow.
-- Tool version floors (google-java-format 1.35, SpotBugs 4.10, Spotless 3.x) exist for **JDK 25 support**: older versions call javac internals / bundle an ASM that break on a JDK-25 toolchain even though CI pins JDK 24.
+- Tool version floors (google-java-format 1.35, SpotBugs 4.10, Spotless 3.x) exist for **JDK 25 support**: older versions call javac internals / bundle an ASM that break on a JDK-25 toolchain. CI now pins JDK 25 (matching `maven.compiler.release`); these floors are what let the whole toolchain run there.
 - Optional local git hooks live in `.pre-commit-config.yaml` (`pre-commit install`); Dependabot config in `.github/dependabot.yml`.
 
 ### pom.xml is a standalone module with no parent POM

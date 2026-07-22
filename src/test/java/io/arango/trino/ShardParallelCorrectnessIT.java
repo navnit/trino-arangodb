@@ -1,32 +1,31 @@
 package io.arango.trino;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
 import io.arango.trino.client.ArangoClient;
 import io.arango.trino.handle.ArangoSplit;
 import io.arango.trino.handle.ArangoTableHandle;
 import io.arango.trino.split.ShardFanoutCapability;
-import io.arango.trino.split.ShardGrouping;
 import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.Constraint;
-import io.trino.spi.connector.DynamicFilter;
+import io.trino.spi.connector.DynamicFilterSnapshot;
 import io.trino.spi.predicate.TupleDomain;
-import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.Tag;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
 import java.util.Set;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Tag;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 
 // @Tag("cluster"): excluded from the default failsafe run (too slow/flaky to boot a real
-// ArangoDB cluster on a 2-vCPU CI runner within the wait window); run via `mvn verify -Pcluster-its`
+// ArangoDB cluster on a 2-vCPU CI runner within the wait window); run via `mvn verify
+// -Pcluster-its`
 // in a separate, non-blocking CI job. See pom.xml it.excludedGroups and .github/workflows/ci.yml.
 @Tag("cluster")
 @ExtendWith(SharedArangoClusterExtension.class)
@@ -62,16 +61,22 @@ class ShardParallelCorrectnessIT {
     }
 
     private static List<ArangoSplit> splits(ArangoConfig config) {
-        ArangoSplitManager mgr = new ArangoSplitManager(client, config, new ShardFanoutCapability(client));
-        ConnectorSplitSource src = mgr.getSplits(null, null, handle(), DynamicFilter.EMPTY, Constraint.alwaysTrue());
-        return src.getNextBatch(1000).getNow(null).getSplits().stream().map(ArangoSplit.class::cast).toList();
+        ArangoSplitManager mgr =
+                new ArangoSplitManager(client, config, new ShardFanoutCapability(client));
+        ConnectorSplitSource src =
+                mgr.getSplits(null, null, handle(), Set.of(), Constraint.alwaysTrue());
+        return src.getNextBatch(1000, DynamicFilterSnapshot.EMPTY).getNow(null).stream()
+                .map(ArangoSplit.class::cast)
+                .toList();
     }
 
     @Test
     void perShardCountsSumToTotalWithNoGapsOrDupes() {
         List<String> shards = client.listShardIds(DB, COLL);
         // count-sum: Σ(per-shard counts) == full (shared function, same path as the runtime probe)
-        assertTrue(ShardFanoutCapability.sumMatchesFull(client, DB, COLL, shards.stream().map(List::of).toList()));
+        assertTrue(
+                ShardFanoutCapability.sumMatchesFull(
+                        client, DB, COLL, shards.stream().map(List::of).toList()));
         // no-dupes: each _key appears in exactly one shard
         Set<String> all = new HashSet<>();
         int total = 0;
@@ -93,10 +98,13 @@ class ShardParallelCorrectnessIT {
 
     @Test
     void maxSplitsCapGroupsShardsAndStillCovers() {
-        List<ArangoSplit> splits = splits(new ArangoConfig().setMaxSplits(2)); // cap below shard count
+        List<ArangoSplit> splits =
+                splits(new ArangoConfig().setMaxSplits(2)); // cap below shard count
         assertEquals(2, splits.size());
         List<List<String>> groups = splits.stream().map(ArangoSplit::shardIds).toList();
-        assertTrue(ShardFanoutCapability.sumMatchesFull(client, DB, COLL, groups), "capped grouping must still cover all docs");
+        assertTrue(
+                ShardFanoutCapability.sumMatchesFull(client, DB, COLL, groups),
+                "capped grouping must still cover all docs");
     }
 
     @Test
@@ -107,7 +115,8 @@ class ShardParallelCorrectnessIT {
     }
 
     private static List<String> keysInShard(String shard) {
-        var cursor = client.query(DB, "FOR d IN @@col RETURN d", Map.of("@col", COLL), List.of(shard));
+        var cursor =
+                client.query(DB, "FOR d IN @@col RETURN d", Map.of("@col", COLL), List.of(shard));
         List<String> keys = new ArrayList<>();
         while (cursor.hasNext()) {
             keys.add(String.valueOf(cursor.next().get("_key")));
