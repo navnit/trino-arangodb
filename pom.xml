@@ -256,7 +256,7 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
-                <version>3.5.2</version>
+                <version>3.5.6</version>
                 <configuration>
                     <!-- DistributedQueryRunner needs Trino's test JVM flags. Copy the exact
                          argLine from Trino 483's root pom and verify at pin. Two flags are
