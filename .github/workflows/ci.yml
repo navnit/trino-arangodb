@@ -16,11 +16,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # maven.compiler.release=25 in pom.xml requires a JDK >= 25.
       - name: Set up JDK 25
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '25'
@@ -60,7 +60,7 @@ jobs:
 
       - name: Upload plugin artifact
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: trino-arangodb-plugin
           path: target/*.zip
@@ -80,10 +80,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up JDK 25
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '25'
@@ -109,7 +109,7 @@ jobs:
       # fetch-depth: 0 pulls full history so the Spotless ratchet (ratchetFrom=origin/master)
       # can resolve the master ref; the shallow default (depth 1) would leave it unresolvable.
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -122,7 +122,7 @@ jobs:
       # versions (google-java-format 1.35, SpotBugs 4.10) are the JDK-25-capable
       # floors the whole toolchain now standardises on.
       - name: Set up JDK 25
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '25'

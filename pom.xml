@@ -14,7 +14,7 @@
         <dep.trino.version>483</dep.trino.version>
         <dep.airlift.version>439</dep.airlift.version>
         <dep.arango.version>7.13.0</dep.arango.version>
-        <dep.testcontainers.version>1.20.4</dep.testcontainers.version>
+        <dep.testcontainers.version>1.21.4</dep.testcontainers.version>
         <dep.junit.version>5.11.3</dep.junit.version>
         <!-- Docker Remote API version handed to the Testcontainers-shaded docker-java
              client via the surefire api.version system property (see the long note on
@@ -27,6 +27,10 @@
              so CI passes the daemon's own reported max via -Ddocker.api.version=... See
              .github/workflows/ci.yml. -->
         <docker.api.version>1.51</docker.api.version>
+        <!-- Default for the maven-surefire-plugin <skip> binding below. The cluster-its CI job
+             overrides it with -Dsurefire.skip=true to run ONLY the @Tag("cluster") failsafe ITs
+             on a clean runner; the normal build leaves it false so the unit suite runs. -->
+        <surefire.skip>false</surefire.skip>
         <!-- JUnit5 tag filtering for the failsafe (integration-test) phase. By default the
              heavy multi-node cluster ITs (@Tag("cluster"): ShardParallelClusterIT and
              ShardParallelCorrectnessIT) are EXCLUDED, because standing up a real ArangoDB
@@ -223,7 +227,7 @@
         <dependency>
             <groupId>org.assertj</groupId>
             <artifactId>assertj-core</artifactId>
-            <version>3.26.3</version>
+            <version>3.27.7</version>
             <scope>test</scope>
         </dependency>
         <dependency>
@@ -270,24 +274,34 @@
                         --add-opens=java.base/java.util=ALL-UNNAMED
                         --add-opens=java.base/sun.nio.ch=ALL-UNNAMED</argLine>
                     <!-- Forced test-mechanics addition (Task 2): the docker-java client shaded
-                         inside testcontainers 1.20.4 defaults to Docker Remote API 1.32
+                         inside testcontainers 1.21.4 defaults to Docker Remote API 1.32
                          (org.testcontainers.shaded...DefaultDockerClientConfig$Builder), which any
                          current Docker Engine (tested: Engine 29.4.3, reporting Api-Version 1.54)
                          rejects with HTTP 400 on /info. The only override point is the JVM system
                          property api.version (no env var equivalent). This is a repo-wide fix, not
                          a machine-specific one: any reviewer/CI running a modern Docker Engine
-                         against pinned testcontainers 1.20.4 hits the same 400. See
+                         against pinned testcontainers 1.21.4 hits the same 400. See
                          task-2-report.md for verification that this alone (no env vars) makes the
                          Testcontainers-backed ArangoClientTest pass. -->
                     <systemPropertyVariables>
                         <api.version>${docker.api.version}</api.version>
                     </systemPropertyVariables>
+                    <!-- Lets the cluster-its CI job skip the (heavy, Testcontainers-based) unit
+                         suite via -Dsurefire.skip=true, so the multi-node cluster boot in the
+                         @Tag("cluster") ITs gets the clean, uncontended runner that job intends.
+                         Maven surefire has no built-in -Dsurefire.skip property (skipTests would
+                         also skip the failsafe ITs we DO want), so bind its skip parameter to a
+                         dedicated property here; it defaults false (declared in <properties>).
+                         Without this the CI flag was a silent no-op: the cluster-its job ran all
+                         155 container-based unit tests first, and on a 2-vCPU runner that churn
+                         starved the cold cluster boot past the wait window. -->
+                    <skip>${surefire.skip}</skip>
                 </configuration>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-failsafe-plugin</artifactId>
-                <version>3.5.2</version>
+                <version>3.5.6</version>
                 <configuration>
                     <!-- Tag filtering (see it.excludedGroups / it.groups above): default build
                          excludes @Tag("cluster") ITs; the cluster-its profile includes only them. -->
@@ -357,7 +371,7 @@
                  restrictions, naming, required @Override, equals/hashCode pairing, empty
                  blocks, missing braces). Pure-formatting checks are intentionally absent
                  from the ruleset so it never fights google-java-format. Checkstyle core
-                 10.21.0 is Java-24-aware. Fails the build on `error` severity. -->
+                 13.8.0 is Java-24-aware. Fails the build on `error` severity. -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-checkstyle-plugin</artifactId>
@@ -366,7 +380,7 @@
                     <dependency>
                         <groupId>com.puppycrawl.tools</groupId>
                         <artifactId>checkstyle</artifactId>
-                        <version>10.21.0</version>
+                        <version>13.8.0</version>
                     </dependency>
                 </dependencies>
                 <configuration>
