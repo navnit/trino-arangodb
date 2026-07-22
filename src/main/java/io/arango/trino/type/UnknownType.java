@@ -51,9 +51,10 @@ import io.trino.spi.type.TypeOperators;
  * trino-spi} classes with plugins, so a real {@code io.trino.type.UnknownType} reference would fail
  * with {@code NoClassDefFoundError} at runtime even if the build succeeded.
  *
- * <p>This file is a verbatim copy of Trino 483's {@code io.trino.type.UnknownType} (Apache License
- * 2.0), relocated into this package so it is loadable purely from {@code trino-spi} + guava (both
- * already dependencies here). Behavior, including the {@link #UNKNOWN} singleton and its {@code
+ * <p>This file is a copy of Trino 483's {@code io.trino.type.UnknownType} (Apache License 2.0) —
+ * its class body is byte-identical to upstream, reformatted only to this project's
+ * google-java-format style — relocated into this package so it is loadable purely from {@code
+ * trino-spi} + guava (both already dependencies here). Behavior, including the {@link #UNKNOWN} singleton and its {@code
  * equals}/{@code hashCode} semantics (inherited from {@link AbstractType}, keyed on class + {@link
  * TypeDescriptor}), is unchanged from upstream.
  */
