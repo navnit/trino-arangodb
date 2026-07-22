@@ -1,0 +1,28 @@
+# Fast local git hooks. Opt in with `pre-commit install`.
+# Heavy analysis (Checkstyle, SpotBugs) stays in CI to keep commits fast; only
+# generic hygiene and the Spotless format check run here.
+minimum_pre_commit_version: "3.0.0"
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: '\.md$'
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+
+  # Format gate, ratcheted to origin/master (same as CI). Runs only on commit so
+  # a fast local loop still catches format drift before it reaches the PR.
+  - repo: local
+    hooks:
+      - id: spotless-check
+        name: spotless:check
+        entry: mvn -B -q spotless:check
+        language: system
+        pass_filenames: false
+        files: '\.java$'

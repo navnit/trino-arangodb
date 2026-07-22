@@ -292,6 +292,105 @@
                     </execution>
                 </executions>
             </plugin>
+
+            <!-- Formatting gate. google-java-format enforces whitespace/line-length/import
+                 order; ratchetFrom=origin/master scopes enforcement to files changed vs
+                 master, so the hand-tuned M1-M3 source is left untouched (CLAUDE.md records
+                 the deliberate "no formatter" state). Run `mvn spotless:apply` to auto-fix,
+                 `mvn spotless:check` to verify. Version floors are driven by JDK 25 support:
+                 google-java-format < 1.28 calls javac internals (Log.getDiagnostics) whose
+                 signature changed in JDK 25, so it throws NoSuchMethodError when run on a
+                 JDK-25 toolchain (contributors, pre-commit) even though CI pins JDK 24 —
+                 1.35.0 runs on both. Spotless 3.x is the matching current line. -->
+            <plugin>
+                <groupId>com.diffplug.spotless</groupId>
+                <artifactId>spotless-maven-plugin</artifactId>
+                <version>3.8.0</version>
+                <configuration>
+                    <ratchetFrom>origin/master</ratchetFrom>
+                    <java>
+                        <googleJavaFormat>
+                            <version>1.35.0</version>
+                            <!-- AOSP style: google-java-format with 4-space indentation,
+                                 matching the existing hand-tuned M1-M3 source (default GJF is
+                                 2-space, which would reindent every touched file and defeat
+                                 the ratchet's don't-disturb-existing-code intent). -->
+                            <style>AOSP</style>
+                        </googleJavaFormat>
+                        <removeUnusedImports/>
+                        <importOrder/>
+                        <trimTrailingWhitespace/>
+                        <endWithNewline/>
+                    </java>
+                </configuration>
+                <!-- Intentionally NOT bound to a lifecycle phase. All three gates run as
+                     explicit goals from the Docker-free CI `static-analysis` job (and via
+                     pre-commit / `mvn spotless:check` locally). Binding `check` to `verify`
+                     would make the Docker test jobs' `mvn verify` also run Spotless, whose
+                     `ratchetFrom=origin/master` needs a ref those jobs don't fetch -> the
+                     build would fail with "No such reference 'origin/master'". -->
+            </plugin>
+
+            <!-- Semantic-convention gate: catches what a formatter can't (import
+                 restrictions, naming, required @Override, equals/hashCode pairing, empty
+                 blocks, missing braces). Pure-formatting checks are intentionally absent
+                 from the ruleset so it never fights google-java-format. Checkstyle core
+                 10.21.0 is Java-24-aware. Fails the build on `error` severity. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-checkstyle-plugin</artifactId>
+                <version>3.6.0</version>
+                <dependencies>
+                    <dependency>
+                        <groupId>com.puppycrawl.tools</groupId>
+                        <artifactId>checkstyle</artifactId>
+                        <version>10.21.0</version>
+                    </dependency>
+                </dependencies>
+                <configuration>
+                    <configLocation>config/checkstyle/checkstyle.xml</configLocation>
+                    <suppressionsLocation>config/checkstyle/suppressions.xml</suppressionsLocation>
+                    <includeTestSourceDirectory>true</includeTestSourceDirectory>
+                    <violationSeverity>error</violationSeverity>
+                    <failOnViolation>true</failOnViolation>
+                </configuration>
+                <!-- Not lifecycle-bound; invoked as `mvn checkstyle:check` (see the Spotless
+                     plugin above for why the gates are decoupled from `verify`). -->
+            </plugin>
+
+            <!-- Bytecode bug-pattern + security gate. findsecbugs-plugin adds injection/crypto
+                 detectors on top of core SpotBugs. effort=Max/threshold=Medium is the
+                 high-signal setting; triaged false positives live in the exclude filter.
+                 SpotBugs analyses compiled bytecode, so `compile` must run before its check.
+                 Versions are on the 4.10 line for JDK 25: SpotBugs < 4.9 bundles an ASM that
+                 cannot read JDK-25 core class files (v69) and dies with "Couldn't get class
+                 info for java/lang/StringBuilder" when run on a JDK-25 toolchain. The core
+                 spotbugs artifact is pinned explicitly (repo convention) to the version the
+                 plugin bundles, so the ASM floor is visible and controlled. -->
+            <plugin>
+                <groupId>com.github.spotbugs</groupId>
+                <artifactId>spotbugs-maven-plugin</artifactId>
+                <version>4.10.3.0</version>
+                <configuration>
+                    <effort>Max</effort>
+                    <threshold>Medium</threshold>
+                    <excludeFilterFile>config/spotbugs/spotbugs-exclude.xml</excludeFilterFile>
+                </configuration>
+                <dependencies>
+                    <dependency>
+                        <groupId>com.github.spotbugs</groupId>
+                        <artifactId>spotbugs</artifactId>
+                        <version>4.10.3</version>
+                    </dependency>
+                    <dependency>
+                        <groupId>com.h3xstream.findsecbugs</groupId>
+                        <artifactId>findsecbugs-plugin</artifactId>
+                        <version>1.14.0</version>
+                    </dependency>
+                </dependencies>
+                <!-- Not lifecycle-bound; invoked as `mvn compile spotbugs:check` (see the
+                     Spotless plugin above for why the gates are decoupled from `verify`). -->
+            </plugin>
         </plugins>
     </build>
 

@@ -1,0 +1,18 @@
+# Dependency and GitHub-Actions update / CVE PRs. GitHub-native, zero build cost.
+# NOTE: the Maven dependency versions here are deliberately pinned with inline
+# rationale in pom.xml (dependency-mediation workarounds). Review Dependabot
+# Maven bumps against those comments before merging — a blind bump can reintroduce
+# a mediation skew the pin exists to prevent.
+version: 2
+updates:
+  - package-ecosystem: "maven"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10

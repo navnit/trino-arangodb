@@ -205,6 +205,24 @@ container via Testcontainers, and end-to-end SQL runs against a live container t
 `DistributedQueryRunner`. Where a test must avoid a live server (e.g. metadata error paths), it
 uses a hand-written `ArangoClient` subclass as a test double.
 
+### Static analysis
+
+A Docker-free static-analysis stack runs as a separate CI job and can be run locally:
+
+```bash
+mvn spotless:check          # google-java-format (AOSP/4-space), ratcheted to origin/master
+mvn spotless:apply          # auto-fix formatting on changed files
+mvn checkstyle:check        # import hygiene, naming, @Override, equals/hashCode, empty blocks
+mvn compile spotbugs:check  # SpotBugs + FindSecBugs bug/security patterns (needs compiled classes)
+```
+
+Formatting is enforced on a **ratchet** (changed files only) so the existing hand-tuned source is
+left untouched; pre-existing Checkstyle/SpotBugs findings are grandfathered with documented
+suppressions under `config/`, and the gates apply to new/changed code going forward. Optional
+local git hooks are available via `.pre-commit-config.yaml` (`pre-commit install`). See
+[`CLAUDE.md`](CLAUDE.md) and the [design spec](docs/superpowers/specs/2026-07-22-static-analysis-tooling-design.md)
+for the full rationale.
+
 See [`CLAUDE.md`](CLAUDE.md) for a detailed architecture walkthrough (SPI wiring, the
 Metadata → SplitManager → PageSourceProvider → PageSource read path, error translation, and the
 `pom.xml` dependency-pin rationale).

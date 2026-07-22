@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Triaged SpotBugs / FindSecBugs exclusions. Every <Match> carries a comment
+  explaining WHY the finding is a false positive or an accepted pattern; an
+  undocumented exclusion is an un-triaged bug in disguise.
+
+  Two kinds of entry:
+    * Pattern-wide excludes for findings that are noise for THIS whole codebase's
+      design (not just existing code) - these mirror Trino's own project-wide
+      spotbugs exclusions and apply going forward.
+    * Narrowly class+method-scoped excludes for individual intentional spots, so
+      the same pattern is still caught everywhere else.
+-->
+<FindBugsFilter>
+    <!-- Verbatim Apache-2.0 relocation of Trino's own io.trino.type.UnknownType.
+         Copied unchanged on purpose; not subject to this repo's analysis. -->
+    <Match>
+        <Class name="io.arango.trino.type.UnknownType"/>
+    </Match>
+
+    <!-- "May expose internal representation." The connector deliberately shares,
+         rather than deep-copies, injected singletons (ArangoClient, ArangoConfig,
+         SchemaResolver) - that sharing is the point of DI - and its handle/record
+         types carry already-immutable collections (ImmutableList) and immutable
+         Trino values (TupleDomain, Type). Defensive copies here would add cost and
+         obscure intent for no safety gain. Trino excludes both patterns project-wide;
+         this follows that precedent and applies to future code too. -->
+    <Match>
+        <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
+    </Match>
+
+    <!-- "Exception thrown in constructor -> Finalizer-attack vulnerability." The
+         connector's constructors validate their arguments and fail fast, which is
+         idiomatic and desirable. These plugin classes define no finalizer and are
+         not a security trust boundary, so the finalizer-attack vector is theoretical.
+         Excluded project-wide (matches Trino). -->
+    <Match>
+        <Bug pattern="CT_CONSTRUCTOR_THROW"/>
+    </Match>
+
+    <!-- Deliberate best-effort cursor close: ArangoPageSource.close() intentionally
+         swallows any exception from the driver cursor (the read is already done and a
+         close failure must not mask the real result). Called out as intentional in the
+         static-analysis design (section 5). Scoped to this one method so a genuinely
+         swallowed exception anywhere else is still flagged. -->
+    <Match>
+        <Class name="io.arango.trino.ArangoPageSource"/>
+        <Method name="close"/>
+        <Bug pattern="DE_MIGHT_IGNORE"/>
+    </Match>
+
+    <!-- Intentional placeholder, not a copy-paste bug: TypeMapper.merge() returns
+         VARCHAR for both arms of `strategy == JSON ? VARCHAR : VARCHAR` because the
+         JSON mixed-type strategy is deferred to M5 (see CLAUDE.md - the JSON config
+         value exists but is not yet an output type). The ternary is left in place to
+         mark the wiring point. Scoped to merge() so real duplicate branches elsewhere
+         are still flagged. -->
+    <Match>
+        <Class name="io.arango.trino.type.TypeMapper"/>
+        <Method name="merge"/>
+        <Bug pattern="DB_DUPLICATE_BRANCHES"/>
+    </Match>
+</FindBugsFilter>
