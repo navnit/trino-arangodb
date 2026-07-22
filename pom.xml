@@ -15,7 +15,7 @@
         <dep.airlift.version>439</dep.airlift.version>
         <dep.arango.version>7.13.0</dep.arango.version>
         <dep.testcontainers.version>1.21.4</dep.testcontainers.version>
-        <dep.junit.version>5.11.3</dep.junit.version>
+        <dep.junit.version>6.1.2</dep.junit.version>
         <!-- Docker Remote API version handed to the Testcontainers-shaded docker-java
              client via the surefire api.version system property (see the long note on
              that property below). Kept as a property so it can be overridden per
@@ -196,22 +196,20 @@
             <scope>test</scope>
         </dependency>
         <!-- Not in brief's Step 3 verbatim listing: forced additions. io.trino:trino-testing:483
-             transitively depends directly on org.junit.jupiter:junit-jupiter-api:6.1.2 (a
-             depth-2 dependency, same depth as junit-jupiter's own transitive request for
-             junit-jupiter-api:5.11.3; the conflicting version rose from 5.13.0 under trino 476
-             to 6.1.2 under 483, but the mechanism is unchanged), and Maven's nearest-wins
-             mediation breaks that depth tie by declaration order, so the newer api was winning
-             and being paired at runtime with junit-jupiter-engine:5.11.3, a binary-incompatible
-             API/engine skew that broke
-             test discovery (UnsupportedOperationException in DisplayNameGenerator). Pinning
-             junit-jupiter-api explicitly as a depth-1 dependency here forces it back to
-             ${dep.junit.version}, which always wins mediation over any depth-2 request
-             regardless of order. Separately, junit-platform-launcher was absent from the
-             resolved tree entirely; Surefire 3.5.2's JUnit-Platform provider needs it on the
-             test classpath, and without it the forked test JVM failed with
-             NoClassDefFoundError on org.junit.platform.engine.reporting.OutputDirectoryProvider.
-             Pinned to 1.11.3, the platform release paired with junit-jupiter 5.11.3. See
-             task-1-report.md Redo section. -->
+             transitively depends directly on org.junit.jupiter:junit-jupiter-api (a depth-2
+             dependency, same depth as junit-jupiter's own transitive request for the same
+             artifact), and Maven's nearest-wins mediation breaks that depth tie by declaration
+             order rather than by version. Now that ${dep.junit.version} (6.1.2) matches what
+             trino-testing:483 itself requests, both depth-2 requests agree and there is no tie
+             to break, but this depth-1 pin is kept anyway as the explicit control point, so a
+             future trino bump that reintroduces a skew fails loudly via a resolvable version
+             conflict rather than silently mismatching api/engine again. Separately,
+             junit-platform-launcher is not on the resolved tree at all via any transitive path;
+             Surefire's JUnit-Platform provider needs it on the test classpath, and without it
+             the forked test JVM fails with NoClassDefFoundError on
+             org.junit.platform.engine.reporting.OutputDirectoryProvider. Pinned to 6.1.2, the
+             platform release paired with junit-jupiter 6.1.2 under JUnit 6's unified versioning
+             scheme (junit-bom:6.1.2 declares junit-platform-launcher:6.1.2). -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter-api</artifactId>
@@ -221,7 +219,7 @@
         <dependency>
             <groupId>org.junit.platform</groupId>
             <artifactId>junit-platform-launcher</artifactId>
-            <version>1.11.3</version>
+            <version>${dep.junit.version}</version>
             <scope>test</scope>
         </dependency>
         <dependency>
