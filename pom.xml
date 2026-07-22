@@ -13,7 +13,7 @@
         <maven.compiler.release>25</maven.compiler.release>
         <dep.trino.version>483</dep.trino.version>
         <dep.airlift.version>439</dep.airlift.version>
-        <dep.arango.version>7.13.0</dep.arango.version>
+        <dep.arango.version>7.26.0</dep.arango.version>
         <dep.testcontainers.version>1.21.4</dep.testcontainers.version>
         <dep.junit.version>5.11.3</dep.junit.version>
         <!-- Docker Remote API version handed to the Testcontainers-shaded docker-java
