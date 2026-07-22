@@ -55,6 +55,7 @@ arangodb.password=
 | `arangodb.schema.sample-size` | `1000` | Number of documents sampled per collection to infer its schema. |
 | `arangodb.schema.sample-random` | `false` | Sample randomly (vs. the first N documents). |
 | `arangodb.schema.mixed-type-strategy` | `VARCHAR` | Fallback type when a field holds genuinely incompatible types across the sample. (`JSON` is accepted but not yet wired to an output type.) |
+| `arangodb.schema.cache-ttl` | `5m` | How long a resolved collection schema is cached before re-sampling. |
 | `arangodb.type-coercion` | `lenient` | Per-cell type-mismatch policy — see [Type coercion](#type-coercion). |
 | `arangodb.shards-per-split` | `1` | Target number of shards grouped into each split on cluster fan-out. See [Sharding / parallelism](#sharding--parallelism). |
 | `arangodb.max-splits` | `32` | Hard cap on the number of splits per collection scan. |
@@ -186,8 +187,6 @@ pushdown safe — the pushed AQL and the reader agree on exactly which values qu
   concurrently-mutated collection can yield a read that is not a single point-in-time snapshot
   across splits (the same limitation applies, in miniature, to any single AQL cursor). Documented,
   not solved.
-- **Schema cache has no TTL** — resolved column metadata is memoized per table for the connector's
-  lifetime.
 - **Non-finite stored doubles** (`Infinity`/`NaN`) can be dropped by a fully-pushed `DOUBLE`
   predicate. This is unreachable via normal JSON ingestion (ArangoDB cannot represent them in
   JSON) and only affects documents written by a native-VelocyPack driver — an accepted limitation.
