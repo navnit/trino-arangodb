@@ -13,24 +13,6 @@
  */
 package io.arango.trino.type;
 
-import io.trino.spi.block.Block;
-import io.trino.spi.block.BlockBuilder;
-import io.trino.spi.block.BlockBuilderStatus;
-import io.trino.spi.block.ByteArrayBlock;
-import io.trino.spi.block.ByteArrayBlockBuilder;
-import io.trino.spi.block.PageBuilderStatus;
-import io.trino.spi.connector.ConnectorSession;
-import io.trino.spi.function.FlatFixed;
-import io.trino.spi.function.FlatFixedOffset;
-import io.trino.spi.function.FlatVariableOffset;
-import io.trino.spi.function.FlatVariableWidth;
-import io.trino.spi.function.ScalarOperator;
-import io.trino.spi.type.AbstractType;
-import io.trino.spi.type.FixedWidthType;
-import io.trino.spi.type.TypeOperatorDeclaration;
-import io.trino.spi.type.TypeOperators;
-import io.trino.spi.type.TypeSignature;
-
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.spi.function.OperatorType.COMPARISON_UNORDERED_LAST;
 import static io.trino.spi.function.OperatorType.EQUAL;
@@ -39,56 +21,69 @@ import static io.trino.spi.function.OperatorType.XX_HASH_64;
 import static io.trino.spi.type.TypeOperatorDeclaration.extractOperatorDeclaration;
 import static java.lang.invoke.MethodHandles.lookup;
 
+import io.trino.spi.block.Block;
+import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.BlockBuilderStatus;
+import io.trino.spi.block.ByteArrayBlock;
+import io.trino.spi.block.ByteArrayBlockBuilder;
+import io.trino.spi.block.PageBuilderStatus;
+import io.trino.spi.function.FlatFixed;
+import io.trino.spi.function.FlatFixedOffset;
+import io.trino.spi.function.FlatVariableOffset;
+import io.trino.spi.function.FlatVariableWidth;
+import io.trino.spi.function.ScalarOperator;
+import io.trino.spi.type.AbstractType;
+import io.trino.spi.type.FixedWidthType;
+import io.trino.spi.type.TypeDescriptor;
+import io.trino.spi.type.TypeOperatorDeclaration;
+import io.trino.spi.type.TypeOperators;
+
 /**
  * Connector-local relocation of Trino's {@code io.trino.type.UnknownType}.
  *
- * <p>Task 3's brief specifies {@code io.trino.spi.type.UnknownType.UNKNOWN} as the bottom
- * sentinel for {@link io.arango.trino.type.TypeMapper}. That class does not exist: Trino's real
- * {@code UnknownType} lives in {@code io.trino.type} inside the {@code trino-main} query-engine
- * module, not in the public {@code trino-spi} contract a connector plugin depends on (verified
- * against the Trino 476 release tag: 404 under {@code trino-spi/.../type/UnknownType.java}, 200
- * under {@code trino-main/.../io/trino/type/UnknownType.java}). Depending on {@code trino-main}
- * directly would be wrong regardless of whether it compiles: Trino's plugin classloader only
- * shares {@code trino-spi} classes with plugins, so a real {@code io.trino.type.UnknownType}
- * reference would fail with {@code NoClassDefFoundError} at runtime even if the build succeeded.
+ * <p>Task 3's brief specifies {@code io.trino.spi.type.UnknownType.UNKNOWN} as the bottom sentinel
+ * for {@link io.arango.trino.type.TypeMapper}. That class does not exist: Trino's real {@code
+ * UnknownType} lives in {@code io.trino.type} inside the {@code trino-main} query-engine module,
+ * not in the public {@code trino-spi} contract a connector plugin depends on (verified against the
+ * Trino 483 release tag: 404 under {@code trino-spi/.../type/UnknownType.java}, 200 under {@code
+ * trino-main/.../io/trino/type/UnknownType.java}). Depending on {@code trino-main} directly would
+ * be wrong regardless of whether it compiles: Trino's plugin classloader only shares {@code
+ * trino-spi} classes with plugins, so a real {@code io.trino.type.UnknownType} reference would fail
+ * with {@code NoClassDefFoundError} at runtime even if the build succeeded.
  *
- * <p>This file is a verbatim copy of Trino 476's {@code io.trino.type.UnknownType} (Apache
- * License 2.0), relocated into this package so it is loadable purely from {@code trino-spi} +
- * guava (both already dependencies here). Behavior, including the {@link #UNKNOWN} singleton and
- * its {@code equals}/{@code hashCode} semantics (inherited from {@link AbstractType}, keyed on
- * class + {@link TypeSignature}), is unchanged from upstream.
+ * <p>This file is a copy of Trino 483's {@code io.trino.type.UnknownType} (Apache License 2.0) —
+ * its class body is byte-identical to upstream, reformatted only to this project's
+ * google-java-format style — relocated into this package so it is loadable purely from {@code
+ * trino-spi} + guava (both already dependencies here). Behavior, including the {@link #UNKNOWN}
+ * singleton and its {@code equals}/{@code hashCode} semantics (inherited from {@link AbstractType},
+ * keyed on class + {@link TypeDescriptor}), is unchanged from upstream.
  */
-public final class UnknownType
-        extends AbstractType
-        implements FixedWidthType
-{
-    private static final TypeOperatorDeclaration TYPE_OPERATOR_DECLARATION = extractOperatorDeclaration(UnknownType.class, lookup(), boolean.class);
+public final class UnknownType extends AbstractType implements FixedWidthType {
+    private static final TypeOperatorDeclaration TYPE_OPERATOR_DECLARATION =
+            extractOperatorDeclaration(UnknownType.class, lookup(), boolean.class);
 
     public static final UnknownType UNKNOWN = new UnknownType();
     public static final String NAME = "unknown";
 
-    private UnknownType()
-    {
+    private UnknownType() {
         // We never access the native container for UNKNOWN because its null check is always true.
         // The actual native container type does not matter here.
         // We choose boolean to represent UNKNOWN because it's the smallest primitive type.
-        super(new TypeSignature(NAME), boolean.class, ByteArrayBlock.class);
+        super(new TypeDescriptor(NAME), boolean.class, ByteArrayBlock.class);
     }
 
     @Override
-    public int getFixedSize()
-    {
+    public int getFixedSize() {
         return Byte.BYTES;
     }
 
     @Override
-    public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries)
-    {
+    public BlockBuilder createBlockBuilder(
+            BlockBuilderStatus blockBuilderStatus, int expectedEntries) {
         int maxBlockSizeInBytes;
         if (blockBuilderStatus == null) {
             maxBlockSizeInBytes = PageBuilderStatus.DEFAULT_MAX_PAGE_SIZE_IN_BYTES;
-        }
-        else {
+        } else {
             maxBlockSizeInBytes = blockBuilderStatus.getMaxPageSizeInBytes();
         }
         return new ByteArrayBlockBuilder(
@@ -97,46 +92,39 @@ public final class UnknownType
     }
 
     @Override
-    public BlockBuilder createFixedSizeBlockBuilder(int positionCount)
-    {
+    public BlockBuilder createFixedSizeBlockBuilder(int positionCount) {
         return new ByteArrayBlockBuilder(null, positionCount);
     }
 
     @Override
-    public boolean isComparable()
-    {
+    public String getDisplayName() {
+        return NAME;
+    }
+
+    @Override
+    public boolean isComparable() {
         return true;
     }
 
     @Override
-    public boolean isOrderable()
-    {
+    public boolean isOrderable() {
         return true;
     }
 
     @Override
-    public TypeOperatorDeclaration getTypeOperatorDeclaration(TypeOperators typeOperators)
-    {
+    public TypeOperatorDeclaration getTypeOperatorDeclaration(TypeOperators typeOperators) {
         return TYPE_OPERATOR_DECLARATION;
     }
 
     @Override
-    public Object getObjectValue(ConnectorSession session, Block block, int position)
-    {
+    public Object getObjectValue(Block block, int position) {
         // call is null in case position is out of bounds
         checkArgument(block.isNull(position), "Expected NULL value for UnknownType");
         return null;
     }
 
     @Override
-    public void appendTo(Block block, int position, BlockBuilder blockBuilder)
-    {
-        blockBuilder.appendNull();
-    }
-
-    @Override
-    public boolean getBoolean(Block block, int position)
-    {
+    public boolean getBoolean(Block block, int position) {
         // Ideally, this function should never be invoked for the unknown type.
         // However, some logic relies on having a default value before the null check.
         checkArgument(block.isNull(position));
@@ -145,17 +133,16 @@ public final class UnknownType
 
     @Deprecated
     @Override
-    public void writeBoolean(BlockBuilder blockBuilder, boolean value)
-    {
+    public void writeBoolean(BlockBuilder blockBuilder, boolean value) {
         // Ideally, this function should never be invoked for the unknown type.
-        // However, some logic (e.g. AbstractMinMaxBy) relies on writing a default value before the null check.
+        // However, some logic (e.g. AbstractMinMaxBy) relies on writing a default value before the
+        // null check.
         checkArgument(!value);
         blockBuilder.appendNull();
     }
 
     @Override
-    public int getFlatFixedSize()
-    {
+    public int getFlatFixedSize() {
         return 0;
     }
 
@@ -164,8 +151,7 @@ public final class UnknownType
             @FlatFixed byte[] unusedFixedSizeSlice,
             @FlatFixedOffset int unusedFixedSizeOffset,
             @FlatVariableWidth byte[] unusedVariableSizeSlice,
-            @FlatVariableOffset int unusedVariableSizeOffset)
-    {
+            @FlatVariableOffset int unusedVariableSizeOffset) {
         throw new AssertionError("value of unknown type should all be NULL");
     }
 
@@ -175,26 +161,22 @@ public final class UnknownType
             byte[] unusedFixedSizeSlice,
             int unusedFixedSizeOffset,
             byte[] unusedVariableSizeSlice,
-            int unusedVariableSizeOffset)
-    {
+            int unusedVariableSizeOffset) {
         throw new AssertionError("value of unknown type should all be NULL");
     }
 
     @ScalarOperator(EQUAL)
-    private static boolean equalOperator(boolean unusedLeft, boolean unusedRight)
-    {
+    private static boolean equalOperator(boolean unusedLeft, boolean unusedRight) {
         throw new AssertionError("value of unknown type should all be NULL");
     }
 
     @ScalarOperator(XX_HASH_64)
-    private static long xxHash64Operator(boolean unusedValue)
-    {
+    private static long xxHash64Operator(boolean unusedValue) {
         throw new AssertionError("value of unknown type should all be NULL");
     }
 
     @ScalarOperator(COMPARISON_UNORDERED_LAST)
-    private static long comparisonOperator(boolean unusedLeft, boolean unusedRight)
-    {
+    private static long comparisonOperator(boolean unusedLeft, boolean unusedRight) {
         throw new AssertionError("value of unknown type should all be NULL");
     }
 }
