@@ -323,13 +323,12 @@
                         <endWithNewline/>
                     </java>
                 </configuration>
-                <executions>
-                    <execution>
-                        <goals>
-                            <goal>check</goal>
-                        </goals>
-                    </execution>
-                </executions>
+                <!-- Intentionally NOT bound to a lifecycle phase. All three gates run as
+                     explicit goals from the Docker-free CI `static-analysis` job (and via
+                     pre-commit / `mvn spotless:check` locally). Binding `check` to `verify`
+                     would make the Docker test jobs' `mvn verify` also run Spotless, whose
+                     `ratchetFrom=origin/master` needs a ref those jobs don't fetch -> the
+                     build would fail with "No such reference 'origin/master'". -->
             </plugin>
 
             <!-- Semantic-convention gate: catches what a formatter can't (import
@@ -355,13 +354,8 @@
                     <violationSeverity>error</violationSeverity>
                     <failOnViolation>true</failOnViolation>
                 </configuration>
-                <executions>
-                    <execution>
-                        <goals>
-                            <goal>check</goal>
-                        </goals>
-                    </execution>
-                </executions>
+                <!-- Not lifecycle-bound; invoked as `mvn checkstyle:check` (see the Spotless
+                     plugin above for why the gates are decoupled from `verify`). -->
             </plugin>
 
             <!-- Bytecode bug-pattern + security gate. findsecbugs-plugin adds injection/crypto
@@ -394,13 +388,8 @@
                         <version>1.14.0</version>
                     </dependency>
                 </dependencies>
-                <executions>
-                    <execution>
-                        <goals>
-                            <goal>check</goal>
-                        </goals>
-                    </execution>
-                </executions>
+                <!-- Not lifecycle-bound; invoked as `mvn compile spotbugs:check` (see the
+                     Spotless plugin above for why the gates are decoupled from `verify`). -->
             </plugin>
         </plugins>
     </build>

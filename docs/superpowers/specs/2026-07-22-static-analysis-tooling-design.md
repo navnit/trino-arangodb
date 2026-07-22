@@ -8,6 +8,7 @@
 - **NeedBraces dropped** from the Checkstyle ruleset (low-signal here; google-java-format does not add braces, so the tools could not converge without a manual reflow).
 - **Tool version floors raised for JDK 25**: google-java-format 1.35 / SpotBugs 4.10 / Spotless 3.x — older versions break on a JDK-25 toolchain (javac-internals API change; ASM too old for class-file v69) even though CI pins JDK 24.
 - **SpotBugs EI_EXPOSE_REP/REP2 and CT_CONSTRUCTOR_THROW excluded project-wide** (matches Trino): injected singletons are meant to be shared and fail-fast constructor validation is idiomatic — these are noise for the whole codebase, not just existing code.
+- **The gates are NOT bound to the `verify` lifecycle** (§3 originally bound them). Binding `check` to `verify` made the pre-existing Docker test CI jobs (`build`, `cluster-its`), which run `mvn verify`, also invoke Spotless — and its `ratchetFrom=origin/master` failed with `No such reference 'origin/master'` on those jobs' shallow checkouts (only the dedicated `static-analysis` job fetches that ref). Reverted to explicit-goal invocation, which also keeps the test jobs decoupled from static analysis (the §4 "separate fast job" intent). Caught in review after the first CI run; `mvn verify` locally could not surface it because a local clone already has `origin/master`.
 
 ---
 
@@ -52,7 +53,7 @@ A new `<pluginManagement>`/`<plugins>` block in `pom.xml`, versions pinned (cons
 - `maven-checkstyle-plugin` (≥ 3.6) driving `checkstyle` core (≥ 10.21, Java-24-aware), config at `config/checkstyle/checkstyle.xml` + `config/checkstyle/suppressions.xml`.
 - `spotbugs-maven-plugin` (≥ 4.8) with `findsecbugs-plugin` dependency, `effort=Max`, `threshold=Medium`, `spotbugs-exclude.xml`.
 
-**Binding choice:** the `check` goals bind to the `verify` phase, so a local `mvn verify` catches issues too — the checks are fast and Docker-free, so this adds negligible cost. They are also runnable standalone (`mvn spotless:check`, `mvn checkstyle:check`, `mvn spotbugs:check`), which is exactly what the fast CI job invokes to get feedback without the Docker test phases. No separate profile — one wiring, usable both ways.
+**Binding choice:** the `check` goals are **not** bound to any lifecycle phase (see the as-built note above — the original "bind to `verify`" choice was reverted). They run as explicit goals (`mvn spotless:check`, `mvn checkstyle:check`, `mvn compile spotbugs:check`), which is exactly what the fast CI job and pre-commit invoke. This keeps the Docker test jobs decoupled from the Spotless ratchet's `origin/master` requirement.
 
 ---
 

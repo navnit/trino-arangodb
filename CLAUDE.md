@@ -27,7 +27,7 @@ Most test classes (`ArangoClientTest`, `ArangoConnectorQueryTest`, `ArangoPageSo
 
 ### Static analysis
 
-The build wires a Docker-free static-analysis stack (all three gates also bind to `verify`, and CI runs them as a separate fast job):
+The build wires a Docker-free static-analysis stack. The three gates are **not** bound to the `verify` lifecycle — they run as explicit goals from a dedicated fast CI job (and locally / via pre-commit). Binding them to `verify` would make the Docker test jobs' `mvn verify` also run Spotless, whose `ratchetFrom=origin/master` needs a ref those jobs don't fetch:
 
 ```bash
 mvn spotless:check      # google-java-format (AOSP/4-space), ratcheted to origin/master
