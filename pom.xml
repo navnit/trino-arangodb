@@ -14,7 +14,7 @@
         <dep.trino.version>476</dep.trino.version>
         <dep.airlift.version>293</dep.airlift.version>
         <dep.arango.version>7.13.0</dep.arango.version>
-        <dep.testcontainers.version>1.20.4</dep.testcontainers.version>
+        <dep.testcontainers.version>1.21.4</dep.testcontainers.version>
         <dep.junit.version>5.11.3</dep.junit.version>
         <!-- Docker Remote API version handed to the Testcontainers-shaded docker-java
              client via the surefire api.version system property (see the long note on
@@ -209,7 +209,7 @@
         <dependency>
             <groupId>org.assertj</groupId>
             <artifactId>assertj-core</artifactId>
-            <version>3.26.3</version>
+            <version>3.27.7</version>
             <scope>test</scope>
         </dependency>
         <dependency>
@@ -248,13 +248,13 @@
                         --add-opens=java.base/java.util=ALL-UNNAMED
                         --add-opens=java.base/sun.nio.ch=ALL-UNNAMED</argLine>
                     <!-- Forced test-mechanics addition (Task 2): the docker-java client shaded
-                         inside testcontainers 1.20.4 defaults to Docker Remote API 1.32
+                         inside testcontainers 1.21.4 defaults to Docker Remote API 1.32
                          (org.testcontainers.shaded...DefaultDockerClientConfig$Builder), which any
                          current Docker Engine (tested: Engine 29.4.3, reporting Api-Version 1.54)
                          rejects with HTTP 400 on /info. The only override point is the JVM system
                          property api.version (no env var equivalent). This is a repo-wide fix, not
                          a machine-specific one: any reviewer/CI running a modern Docker Engine
-                         against pinned testcontainers 1.20.4 hits the same 400. See
+                         against pinned testcontainers 1.21.4 hits the same 400. See
                          task-2-report.md for verification that this alone (no env vars) makes the
                          Testcontainers-backed ArangoClientTest pass. -->
                     <systemPropertyVariables>
@@ -265,7 +265,7 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-failsafe-plugin</artifactId>
-                <version>3.5.2</version>
+                <version>3.5.6</version>
                 <configuration>
                     <!-- Tag filtering (see it.excludedGroups / it.groups above): default build
                          excludes @Tag("cluster") ITs; the cluster-its profile includes only them. -->
@@ -335,7 +335,7 @@
                  restrictions, naming, required @Override, equals/hashCode pairing, empty
                  blocks, missing braces). Pure-formatting checks are intentionally absent
                  from the ruleset so it never fights google-java-format. Checkstyle core
-                 10.21.0 is Java-24-aware. Fails the build on `error` severity. -->
+                 13.8.0 is Java-24-aware. Fails the build on `error` severity. -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-checkstyle-plugin</artifactId>
@@ -344,7 +344,7 @@
                     <dependency>
                         <groupId>com.puppycrawl.tools</groupId>
                         <artifactId>checkstyle</artifactId>
-                        <version>10.21.0</version>
+                        <version>13.8.0</version>
                     </dependency>
                 </dependencies>
                 <configuration>
