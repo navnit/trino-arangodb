@@ -1,18 +1,28 @@
 package io.arango.trino;
 
+import static java.util.concurrent.TimeUnit.MINUTES;
+
 import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableList;
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
 import io.airlift.configuration.ConfigSecuritySensitive;
+import io.airlift.units.Duration;
+import io.airlift.units.MinDuration;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
-
 import java.util.List;
 
 public class ArangoConfig {
-    public enum MixedTypeStrategy { VARCHAR, JSON }
-    public enum TypeCoercion { LENIENT, STRICT }
+    public enum MixedTypeStrategy {
+        VARCHAR,
+        JSON
+    }
+
+    public enum TypeCoercion {
+        LENIENT,
+        STRICT
+    }
 
     private String hosts = "localhost:8529";
     private String user = "root";
@@ -20,60 +30,106 @@ public class ArangoConfig {
     private int sampleSize = 1000;
     private boolean sampleRandom = false;
     private MixedTypeStrategy mixedTypeStrategy = MixedTypeStrategy.VARCHAR;
+    private Duration schemaCacheTtl = new Duration(5, MINUTES);
     private TypeCoercion typeCoercion = TypeCoercion.LENIENT;
     private int shardsPerSplit = 1;
     private int maxSplits = 32;
     private boolean shardParallelismEnabled = true;
 
     @NotNull
-    public String getHosts() { return hosts; }
+    public String getHosts() {
+        return hosts;
+    }
 
     @Config("arangodb.hosts")
     @ConfigDescription("Comma-separated host:port coordinators")
-    public ArangoConfig setHosts(String hosts) { this.hosts = hosts; return this; }
+    public ArangoConfig setHosts(String hosts) {
+        this.hosts = hosts;
+        return this;
+    }
 
     public List<String> getHostList() {
         return ImmutableList.copyOf(Splitter.on(',').trimResults().omitEmptyStrings().split(hosts));
     }
 
     @NotNull
-    public String getUser() { return user; }
+    public String getUser() {
+        return user;
+    }
 
     @Config("arangodb.user")
-    public ArangoConfig setUser(String user) { this.user = user; return this; }
+    public ArangoConfig setUser(String user) {
+        this.user = user;
+        return this;
+    }
 
-    public String getPassword() { return password; }
+    public String getPassword() {
+        return password;
+    }
 
     @Config("arangodb.password")
     @ConfigSecuritySensitive
-    public ArangoConfig setPassword(String password) { this.password = password; return this; }
+    public ArangoConfig setPassword(String password) {
+        this.password = password;
+        return this;
+    }
 
     @Min(1)
-    public int getSampleSize() { return sampleSize; }
+    public int getSampleSize() {
+        return sampleSize;
+    }
 
     @Config("arangodb.schema.sample-size")
-    public ArangoConfig setSampleSize(int sampleSize) { this.sampleSize = sampleSize; return this; }
+    public ArangoConfig setSampleSize(int sampleSize) {
+        this.sampleSize = sampleSize;
+        return this;
+    }
 
-    public boolean isSampleRandom() { return sampleRandom; }
+    public boolean isSampleRandom() {
+        return sampleRandom;
+    }
 
     @Config("arangodb.schema.sample-random")
-    public ArangoConfig setSampleRandom(boolean sampleRandom) { this.sampleRandom = sampleRandom; return this; }
-
-    @NotNull
-    public MixedTypeStrategy getMixedTypeStrategy() { return mixedTypeStrategy; }
-
-    @Config("arangodb.schema.mixed-type-strategy")
-    public ArangoConfig setMixedTypeStrategy(MixedTypeStrategy mixedTypeStrategy) {
-        this.mixedTypeStrategy = mixedTypeStrategy; return this;
+    public ArangoConfig setSampleRandom(boolean sampleRandom) {
+        this.sampleRandom = sampleRandom;
+        return this;
     }
 
     @NotNull
-    public TypeCoercion getTypeCoercion() { return typeCoercion; }
+    public MixedTypeStrategy getMixedTypeStrategy() {
+        return mixedTypeStrategy;
+    }
+
+    @Config("arangodb.schema.mixed-type-strategy")
+    public ArangoConfig setMixedTypeStrategy(MixedTypeStrategy mixedTypeStrategy) {
+        this.mixedTypeStrategy = mixedTypeStrategy;
+        return this;
+    }
+
+    @NotNull
+    @MinDuration("0ms")
+    public Duration getSchemaCacheTtl() {
+        return schemaCacheTtl;
+    }
+
+    @Config("arangodb.schema.cache-ttl")
+    @ConfigDescription("How long a resolved collection schema is cached before re-sampling")
+    public ArangoConfig setSchemaCacheTtl(Duration schemaCacheTtl) {
+        this.schemaCacheTtl = schemaCacheTtl;
+        return this;
+    }
+
+    @NotNull
+    public TypeCoercion getTypeCoercion() {
+        return typeCoercion;
+    }
 
     @Config("arangodb.type-coercion")
-    @ConfigDescription("Per-cell type-mismatch policy: LENIENT reads a mismatched value as NULL, STRICT raises an error")
+    @ConfigDescription(
+            "Per-cell type-mismatch policy: LENIENT reads a mismatched value as NULL, STRICT raises an error")
     public ArangoConfig setTypeCoercion(TypeCoercion typeCoercion) {
-        this.typeCoercion = typeCoercion; return this;
+        this.typeCoercion = typeCoercion;
+        return this;
     }
 
     @Min(1)
@@ -105,7 +161,8 @@ public class ArangoConfig {
     }
 
     @Config("arangodb.shard-parallelism-enabled")
-    @ConfigDescription("Enable per-shard parallel splits on clusters; false forces a single split and never uses the internal shardIds API")
+    @ConfigDescription(
+            "Enable per-shard parallel splits on clusters; false forces a single split and never uses the internal shardIds API")
     public ArangoConfig setShardParallelismEnabled(boolean shardParallelismEnabled) {
         this.shardParallelismEnabled = shardParallelismEnabled;
         return this;

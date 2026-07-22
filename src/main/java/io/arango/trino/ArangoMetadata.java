@@ -1,8 +1,18 @@
 package io.arango.trino;
 
+import static com.google.common.base.Throwables.throwIfUnchecked;
+import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
+
 import com.arangodb.ArangoDBException;
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Ticker;
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.util.concurrent.UncheckedExecutionException;
 import com.google.inject.Inject;
 import io.arango.trino.client.ArangoClient;
 import io.arango.trino.client.ArangoClient.CollectionInfo;
@@ -26,17 +36,13 @@ import io.trino.spi.type.DoubleType;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
-
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
-import java.util.concurrent.ConcurrentHashMap;
-
-import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
-import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import java.util.concurrent.ExecutionException;
 
 public class ArangoMetadata implements ConnectorMetadata {
     // ArangoDB's own documented error number for "database not found" (stable across the
@@ -48,15 +54,30 @@ public class ArangoMetadata implements ConnectorMetadata {
     private final ArangoClient client;
     private final SchemaResolver schemaResolver;
     private final ArangoConfig config;
-    // M1: unbounded per-connector memoization so one SELECT samples a collection once;
-    // spec §4.3 TTL cache lands in a later milestone.
-    private final Map<SchemaTableName, List<ArangoColumn>> columnCache = new ConcurrentHashMap<>();
+    // Resolved-column cache with a configurable TTL (spec §4.3): one SELECT samples a
+    // collection once; entries expire a fixed span after resolution so a stale schema
+    // surfaces as a normal NULL on a missing field, not an error.
+    private final Cache<SchemaTableName, List<ArangoColumn>> columnCache;
 
     @Inject
     public ArangoMetadata(ArangoClient client, SchemaResolver schemaResolver, ArangoConfig config) {
+        this(client, schemaResolver, config, Ticker.systemTicker());
+    }
+
+    @VisibleForTesting
+    ArangoMetadata(
+            ArangoClient client,
+            SchemaResolver schemaResolver,
+            ArangoConfig config,
+            Ticker ticker) {
         this.client = client;
         this.schemaResolver = schemaResolver;
         this.config = config;
+        this.columnCache =
+                CacheBuilder.newBuilder()
+                        .expireAfterWrite(config.getSchemaCacheTtl().toMillis(), MILLISECONDS)
+                        .ticker(ticker)
+                        .build();
     }
 
     @Override
@@ -65,25 +86,36 @@ public class ArangoMetadata implements ConnectorMetadata {
     }
 
     @Override
-    public ArangoTableHandle getTableHandle(ConnectorSession session, SchemaTableName tableName,
-            Optional<ConnectorTableVersion> startVersion, Optional<ConnectorTableVersion> endVersion) {
+    public ArangoTableHandle getTableHandle(
+            ConnectorSession session,
+            SchemaTableName tableName,
+            Optional<ConnectorTableVersion> startVersion,
+            Optional<ConnectorTableVersion> endVersion) {
         if (startVersion.isPresent() || endVersion.isPresent()) {
-            throw new TrinoException(NOT_SUPPORTED, "This connector does not support versioned tables");
+            throw new TrinoException(
+                    NOT_SUPPORTED, "This connector does not support versioned tables");
         }
         try {
             return client.listCollections(tableName.getSchemaName()).stream()
                     .filter(c -> !c.isSystem() && c.name().equals(tableName.getTableName()))
                     .findFirst()
-                    .map(c -> new ArangoTableHandle(tableName.getSchemaName(), c.name(), c.isEdge(),
-                            TupleDomain.all(), OptionalLong.empty()))
+                    .map(
+                            c ->
+                                    new ArangoTableHandle(
+                                            tableName.getSchemaName(),
+                                            c.name(),
+                                            c.isEdge(),
+                                            TupleDomain.all(),
+                                            OptionalLong.empty()))
                     .orElse(null); // null => table not found (Trino throws)
-        }
-        catch (ArangoDBException e) {
+        } catch (ArangoDBException e) {
             if (isDatabaseNotFound(e)) {
                 return null; // schema (database) does not exist => table not found
             }
-            throw new TrinoException(GENERIC_INTERNAL_ERROR,
-                    "Failed to look up table '%s' in ArangoDB".formatted(tableName), e);
+            throw new TrinoException(
+                    GENERIC_INTERNAL_ERROR,
+                    "Failed to look up table '%s' in ArangoDB".formatted(tableName),
+                    e);
         }
     }
 
@@ -92,26 +124,39 @@ public class ArangoMetadata implements ConnectorMetadata {
     }
 
     @Override
-    public ConnectorTableMetadata getTableMetadata(ConnectorSession session, ConnectorTableHandle table) {
+    public ConnectorTableMetadata getTableMetadata(
+            ConnectorSession session, ConnectorTableHandle table) {
         ArangoTableHandle handle = (ArangoTableHandle) table;
-        List<ColumnMetadata> columns = resolve(handle).stream()
-                .map(c -> new ArangoColumnHandle(c.name(), c.type(), c.hidden(), List.of(c.name())).toColumnMetadata())
-                .collect(ImmutableList.toImmutableList());
+        List<ColumnMetadata> columns =
+                resolve(handle).stream()
+                        .map(
+                                c ->
+                                        new ArangoColumnHandle(
+                                                        c.name(),
+                                                        c.type(),
+                                                        c.hidden(),
+                                                        List.of(c.name()))
+                                                .toColumnMetadata())
+                        .collect(ImmutableList.toImmutableList());
         return new ConnectorTableMetadata(handle.schemaTableName(), columns);
     }
 
     @Override
-    public Map<String, ColumnHandle> getColumnHandles(ConnectorSession session, ConnectorTableHandle table) {
+    public Map<String, ColumnHandle> getColumnHandles(
+            ConnectorSession session, ConnectorTableHandle table) {
         ArangoTableHandle handle = (ArangoTableHandle) table;
         ImmutableMap.Builder<String, ColumnHandle> out = ImmutableMap.builder();
         for (ArangoColumn c : resolve(handle)) {
-            out.put(c.name(), new ArangoColumnHandle(c.name(), c.type(), c.hidden(), List.of(c.name())));
+            out.put(
+                    c.name(),
+                    new ArangoColumnHandle(c.name(), c.type(), c.hidden(), List.of(c.name())));
         }
         return out.buildOrThrow();
     }
 
     @Override
-    public ColumnMetadata getColumnMetadata(ConnectorSession session, ConnectorTableHandle table, ColumnHandle columnHandle) {
+    public ColumnMetadata getColumnMetadata(
+            ConnectorSession session, ConnectorTableHandle table, ColumnHandle columnHandle) {
         return ((ArangoColumnHandle) columnHandle).toColumnMetadata();
     }
 
@@ -123,13 +168,14 @@ public class ArangoMetadata implements ConnectorMetadata {
             List<CollectionInfo> collections;
             try {
                 collections = client.listCollections(schema);
-            }
-            catch (ArangoDBException e) {
+            } catch (ArangoDBException e) {
                 if (isDatabaseNotFound(e)) {
                     continue; // schema (database) does not exist => zero tables in it
                 }
-                throw new TrinoException(GENERIC_INTERNAL_ERROR,
-                        "Failed to list tables in schema '%s' in ArangoDB".formatted(schema), e);
+                throw new TrinoException(
+                        GENERIC_INTERNAL_ERROR,
+                        "Failed to list tables in schema '%s' in ArangoDB".formatted(schema),
+                        e);
             }
             for (CollectionInfo c : collections) {
                 if (!c.isSystem()) {
@@ -150,9 +196,12 @@ public class ArangoMetadata implements ConnectorMetadata {
         }
         // If a LIMIT is already pushed onto this handle, a further filter push would render as
         // FILTER-before-LIMIT in the single-FOR AQL scan (AqlBuilder.buildScan), reordering the
-        // semantics of `(... LIMIT n) WHERE p` (limit-then-filter) into filter-then-limit. Decline the
-        // push and leave the filter residual (base-JDBC does the same). The common `WHERE p LIMIT n`
-        // shape is unaffected -- Trino pushes the filter first, before any limit exists on the handle.
+        // semantics of `(... LIMIT n) WHERE p` (limit-then-filter) into filter-then-limit. Decline
+        // the
+        // push and leave the filter residual (base-JDBC does the same). The common `WHERE p LIMIT
+        // n`
+        // shape is unaffected -- Trino pushes the filter first, before any limit exists on the
+        // handle.
         if (handle.limit().isPresent()) {
             return Optional.empty();
         }
@@ -166,16 +215,18 @@ public class ArangoMetadata implements ConnectorMetadata {
             if (isPushable(column.type(), domain)) {
                 pushedBuilder.put(column, domain);
                 if (isPrefilterOnly(column.type(), domain)) {
-                    residualBuilder.put(column, domain); // Trino re-checks the AQL prefilter's superset
+                    residualBuilder.put(
+                            column, domain); // Trino re-checks the AQL prefilter's superset
                 }
-            }
-            else {
+            } else {
                 residualBuilder.put(column, domain);
             }
         }
 
-        TupleDomain<ColumnHandle> pushed = TupleDomain.withColumnDomains(pushedBuilder.buildOrThrow());
-        TupleDomain<ColumnHandle> residual = TupleDomain.withColumnDomains(residualBuilder.buildOrThrow());
+        TupleDomain<ColumnHandle> pushed =
+                TupleDomain.withColumnDomains(pushedBuilder.buildOrThrow());
+        TupleDomain<ColumnHandle> residual =
+                TupleDomain.withColumnDomains(residualBuilder.buildOrThrow());
 
         TupleDomain<ColumnHandle> newHandleConstraint = handle.constraint().intersect(pushed);
         if (newHandleConstraint.equals(handle.constraint())) {
@@ -183,12 +234,16 @@ public class ArangoMetadata implements ConnectorMetadata {
         }
 
         ArangoTableHandle newHandle = handle.withConstraint(newHandleConstraint);
-        return Optional.of(new ConstraintApplicationResult<>(newHandle, residual, constraint.getExpression(), false));
+        return Optional.of(
+                new ConstraintApplicationResult<>(
+                        newHandle, residual, constraint.getExpression(), false));
     }
 
     // Widened M2 pushdown. The read path (ValueMaterializer) is type-exact, so a pushed
-    // AQL predicate and Trino's residual re-check admit exactly the same values (the core invariant).
-    // Equality/IN need no guard (AQL ==/IN are type-strict); numeric range is guarded in AqlBuilder.
+    // AQL predicate and Trino's residual re-check admit exactly the same values (the core
+    // invariant).
+    // Equality/IN need no guard (AQL ==/IN are type-strict); numeric range is guarded in
+    // AqlBuilder.
     private boolean isPushable(Type type, Domain domain) {
         if (domain.isAll()) {
             return false;
@@ -199,8 +254,10 @@ public class ArangoMetadata implements ConnectorMetadata {
         if (config.getTypeCoercion() == ArangoConfig.TypeCoercion.STRICT) {
             return false;
         }
-        // IS NULL / IS NOT NULL and any null-allowing domain stay residual: AQL == null/!= null test
-        // the raw stored value, which diverges from Trino's post-coercion null-ness on a type mismatch.
+        // IS NULL / IS NOT NULL and any null-allowing domain stay residual: AQL == null/!= null
+        // test
+        // the raw stored value, which diverges from Trino's post-coercion null-ness on a type
+        // mismatch.
         if (domain.isNullAllowed()) {
             return false;
         }
@@ -215,21 +272,29 @@ public class ArangoMetadata implements ConnectorMetadata {
                     || type.equals(BigintType.BIGINT)
                     || type.equals(DoubleType.DOUBLE);
         }
-        // Numeric range: BIGINT and DOUBLE (guarded by AqlBuilder). DOUBLE is fully enforced; BIGINT
+        // Numeric range: BIGINT and DOUBLE (guarded by AqlBuilder). DOUBLE is fully enforced;
+        // BIGINT
         // is prefilter-only (see isPrefilterOnly / applyFilter). String range stays residual.
         return type.equals(BigintType.BIGINT) || type.equals(DoubleType.DOUBLE);
     }
 
-    // A pushable predicate whose AQL form admits a SUPERSET of what ValueMaterializer writes non-NULL, so
-    // it must ALSO stay in Trino's residual for a post-read re-check. Only BIGINT range qualifies: its
-    // bare IS_NUMBER guard (AqlBuilder) admits fractional values and integral values outside signed-64-bit
-    // range, both of which ValueMaterializer reads as NULL -- the residual re-check drops them. We cannot tighten
-    // the guard to integers-in-range: AQL FLOOR() returns a double and would false-miss a stored int64
+    // A pushable predicate whose AQL form admits a SUPERSET of what ValueMaterializer writes
+    // non-NULL, so
+    // it must ALSO stay in Trino's residual for a post-read re-check. Only BIGINT range qualifies:
+    // its
+    // bare IS_NUMBER guard (AqlBuilder) admits fractional values and integral values outside
+    // signed-64-bit
+    // range, both of which ValueMaterializer reads as NULL -- the residual re-check drops them. We
+    // cannot tighten
+    // the guard to integers-in-range: AQL FLOOR() returns a double and would false-miss a stored
+    // int64
     // > 2^53 (review finding C3). Everything else is fully enforced, never prefilter-only:
-    //   - Equality/IN agrees for every type: ArangoDB compares by exact value and the BIGINT read path
+    //   - Equality/IN agrees for every type: ArangoDB compares by exact value and the BIGINT read
+    // path
     //     is exact (longValue(), no rounding); DOUBLE eq/IN promotes its operand with `+ 0.0`.
     //   - DOUBLE range agrees because AqlBuilder promotes the DOUBLE operand into double space with
-    //     `+ 0.0`, matching ValueMaterializer's n.doubleValue() rounding; a bare comparison would diverge for
+    //     `+ 0.0`, matching ValueMaterializer's n.doubleValue() rounding; a bare comparison would
+    // diverge for
     //     a stored int64 > 2^53 (review finding C1).
     // (Review finding C2, option 2, covers the BIGINT-range superset handling.)
     private static boolean isPrefilterOnly(Type type, Domain domain) {
@@ -244,16 +309,21 @@ public class ArangoMetadata implements ConnectorMetadata {
             return Optional.empty();
         }
         // Exact only for a single-split scan. With shard-parallelism enabled the table may fan out
-        // (ArangoSplitManager), and each split applies LIMIT n independently (total <= n * splits), so
-        // Trino must apply the final LIMIT -> report false. Disabled => always one split => exact => true.
+        // (ArangoSplitManager), and each split applies LIMIT n independently (total <= n * splits),
+        // so
+        // Trino must apply the final LIMIT -> report false. Disabled => always one split => exact
+        // => true.
         boolean limitGuaranteed = !config.isShardParallelismEnabled();
-        return Optional.of(new LimitApplicationResult<>(handle.withLimit(limit), limitGuaranteed, false));
+        return Optional.of(
+                new LimitApplicationResult<>(handle.withLimit(limit), limitGuaranteed, false));
     }
 
     @Override
     public Optional<ProjectionApplicationResult<ConnectorTableHandle>> applyProjection(
-            ConnectorSession session, ConnectorTableHandle table,
-            List<ConnectorExpression> projections, Map<String, ColumnHandle> assignments) {
+            ConnectorSession session,
+            ConnectorTableHandle table,
+            List<ConnectorExpression> projections,
+            Map<String, ColumnHandle> assignments) {
         ImmutableList.Builder<ConnectorExpression> newProjections = ImmutableList.builder();
         ImmutableList.Builder<Assignment> newAssignments = ImmutableList.builder();
         Map<String, ArangoColumnHandle> deduped = new LinkedHashMap<>();
@@ -262,15 +332,17 @@ public class ArangoMetadata implements ConnectorMetadata {
         for (ConnectorExpression projection : projections) {
             Optional<ArangoColumnHandle> resolved;
             if (projection instanceof Variable variable) {
-                resolved = assignments.get(variable.getName()) instanceof ArangoColumnHandle existing
-                        ? Optional.of(existing) : Optional.empty();
-            }
-            else {
+                resolved =
+                        assignments.get(variable.getName()) instanceof ArangoColumnHandle existing
+                                ? Optional.of(existing)
+                                : Optional.empty();
+            } else {
                 resolved = resolveDereference(projection, assignments);
                 progress |= resolved.isPresent();
             }
             if (resolved.isEmpty()) {
-                return Optional.empty(); // an expression we can't represent -- decline the whole call
+                return Optional
+                        .empty(); // an expression we can't represent -- decline the whole call
             }
             ArangoColumnHandle column = resolved.get();
             ArangoColumnHandle priorAssignment = deduped.get(column.name());
@@ -293,7 +365,9 @@ public class ArangoMetadata implements ConnectorMetadata {
         if (!progress) {
             return Optional.empty(); // pure passthrough of existing columns: nothing new to report
         }
-        return Optional.of(new ProjectionApplicationResult<>(table, newProjections.build(), newAssignments.build(), false));
+        return Optional.of(
+                new ProjectionApplicationResult<>(
+                        table, newProjections.build(), newAssignments.build(), false));
     }
 
     // Walks a (possibly chained) FieldDereference down to its root Variable, resolving each
@@ -336,15 +410,26 @@ public class ArangoMetadata implements ConnectorMetadata {
             name.append('$').append(fieldName);
             currentType = field.getType();
         }
-        if (currentType instanceof RowType || currentType instanceof ArrayType || currentType instanceof DecimalType) {
+        if (currentType instanceof RowType
+                || currentType instanceof ArrayType
+                || currentType instanceof DecimalType) {
             return Optional.empty();
         }
         return Optional.of(new ArangoColumnHandle(name.toString(), currentType, false, path));
     }
 
     private List<ArangoColumn> resolve(ArangoTableHandle handle) {
-        return columnCache.computeIfAbsent(handle.schemaTableName(), key ->
-                schemaResolver.resolveColumns(handle.schema(),
-                        new CollectionInfo(handle.table(), handle.edge(), false)));
+        try {
+            return columnCache.get(
+                    handle.schemaTableName(),
+                    () ->
+                            schemaResolver.resolveColumns(
+                                    handle.schema(),
+                                    new CollectionInfo(handle.table(), handle.edge(), false)));
+        } catch (ExecutionException | UncheckedExecutionException e) {
+            Throwable cause = e.getCause();
+            throwIfUnchecked(cause); // resolveColumns throws only unchecked; this rethrows it as-is
+            throw new RuntimeException(cause); // unreachable, required for the compiler
+        }
     }
 }
