@@ -265,7 +265,7 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-failsafe-plugin</artifactId>
-                <version>3.5.2</version>
+                <version>3.5.6</version>
                 <configuration>
                     <!-- Tag filtering (see it.excludedGroups / it.groups above): default build
                          excludes @Tag("cluster") ITs; the cluster-its profile includes only them. -->
