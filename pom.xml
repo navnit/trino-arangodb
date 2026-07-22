@@ -27,6 +27,10 @@
              so CI passes the daemon's own reported max via -Ddocker.api.version=... See
              .github/workflows/ci.yml. -->
         <docker.api.version>1.51</docker.api.version>
+        <!-- Default for the maven-surefire-plugin <skip> binding below. The cluster-its CI job
+             overrides it with -Dsurefire.skip=true to run ONLY the @Tag("cluster") failsafe ITs
+             on a clean runner; the normal build leaves it false so the unit suite runs. -->
+        <surefire.skip>false</surefire.skip>
         <!-- JUnit5 tag filtering for the failsafe (integration-test) phase. By default the
              heavy multi-node cluster ITs (@Tag("cluster"): ShardParallelClusterIT and
              ShardParallelCorrectnessIT) are EXCLUDED, because standing up a real ArangoDB
@@ -282,6 +286,16 @@
                     <systemPropertyVariables>
                         <api.version>${docker.api.version}</api.version>
                     </systemPropertyVariables>
+                    <!-- Lets the cluster-its CI job skip the (heavy, Testcontainers-based) unit
+                         suite via -Dsurefire.skip=true, so the multi-node cluster boot in the
+                         @Tag("cluster") ITs gets the clean, uncontended runner that job intends.
+                         Maven surefire has no built-in -Dsurefire.skip property (skipTests would
+                         also skip the failsafe ITs we DO want), so bind its skip parameter to a
+                         dedicated property here; it defaults false (declared in <properties>).
+                         Without this the CI flag was a silent no-op: the cluster-its job ran all
+                         155 container-based unit tests first, and on a 2-vCPU runner that churn
+                         starved the cold cluster boot past the wait window. -->
+                    <skip>${surefire.skip}</skip>
                 </configuration>
             </plugin>
             <plugin>
