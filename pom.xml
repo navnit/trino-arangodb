@@ -163,7 +163,7 @@
         <dependency>
             <groupId>io.airlift</groupId>
             <artifactId>jmx</artifactId>
-            <version>336</version>
+            <version>441</version>
             <scope>test</scope>
         </dependency>
         <dependency>
