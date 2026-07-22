@@ -1,17 +1,8 @@
 package io.arango.trino;
 
-import io.arango.trino.client.ArangoClient;
-import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.TestInstance;
-import org.testcontainers.containers.BindMode;
-import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.containers.Network;
-import org.testcontainers.containers.wait.strategy.Wait;
-import org.testcontainers.images.builder.Transferable;
-import org.testcontainers.utility.DockerImageName;
+import static org.assertj.core.api.Assertions.assertThat;
 
+import io.arango.trino.client.ArangoClient;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -23,19 +14,27 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
-
-import static org.assertj.core.api.Assertions.assertThat;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.testcontainers.containers.BindMode;
+import org.testcontainers.containers.GenericContainer;
+import org.testcontainers.containers.Network;
+import org.testcontainers.containers.wait.strategy.Wait;
+import org.testcontainers.images.builder.Transferable;
+import org.testcontainers.utility.DockerImageName;
 
 /**
  * End-to-end packaging smoke test. Mounts the *packaged* plugin directory
  * (target/trino-arangodb-&lt;version&gt;, passed as -Dplugin.dir by failsafe) into a real
- * trinodb/trino:476 container, points it at a real ArangoDB container over a shared Docker
- * network, and runs SQL over JDBC.
+ * trinodb/trino:483 container, points it at a real ArangoDB container over a shared Docker network,
+ * and runs SQL over JDBC.
  *
- * <p>Unlike the in-JVM {@code DistributedQueryRunner} tests (which load the plugin on a flat
- * test classpath), this exercises real per-plugin classloader isolation of the packaged bundle
- * and actual plugin discovery/startup. The {@code *IT} suffix routes it to failsafe (verify
- * phase, after {@code package}), so it is excluded from {@code mvn test}.
+ * <p>Unlike the in-JVM {@code DistributedQueryRunner} tests (which load the plugin on a flat test
+ * classpath), this exercises real per-plugin classloader isolation of the packaged bundle and
+ * actual plugin discovery/startup. The {@code *IT} suffix routes it to failsafe (verify phase,
+ * after {@code package}), so it is excluded from {@code mvn test}.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class PackagingSmokeIT {
@@ -55,15 +54,20 @@ class PackagingSmokeIT {
             throw new IllegalStateException(
                     "plugin.dir must point at the packaged plugin directory "
                             + "(target/trino-arangodb-<version>). Run via `mvn verify` "
-                            + "(failsafe sets it). Got: " + pluginDir);
+                            + "(failsafe sets it). Got: "
+                            + pluginDir);
         }
 
         network = Network.newNetwork();
 
         // ArangoDB on the shared network under a stable alias; seeded via the host-mapped port.
         arango = new TestingArangoServer(network, ARANGO_ALIAS);
-        try (ArangoClient seed = new ArangoClient(new ArangoConfig()
-                .setHosts(arango.hostPort()).setUser("root").setPassword(arango.rootPassword()))) {
+        try (ArangoClient seed =
+                new ArangoClient(
+                        new ArangoConfig()
+                                .setHosts(arango.hostPort())
+                                .setUser("root")
+                                .setPassword(arango.rootPassword()))) {
             seed.createDatabaseForTest("shop");
             seed.createDocumentCollectionForTest("shop", "users");
             seed.insertForTest("shop", "users", Map.of("name", "ada", "age", 36L));
@@ -72,21 +76,36 @@ class PackagingSmokeIT {
 
         // Catalog the Trino container reads at startup. It reaches ArangoDB at the *internal*
         // network address (alias + container port), NOT the JVM-visible host-mapped port.
-        String catalog = "connector.name=arangodb\n"
-                + "arangodb.hosts=" + ARANGO_ALIAS + ":" + ARANGO_PORT + "\n"
-                + "arangodb.user=root\n"
-                + "arangodb.password=" + arango.rootPassword() + "\n";
+        String catalog =
+                "connector.name=arangodb\n"
+                        + "arangodb.hosts="
+                        + ARANGO_ALIAS
+                        + ":"
+                        + ARANGO_PORT
+                        + "\n"
+                        + "arangodb.user=root\n"
+                        + "arangodb.password="
+                        + arango.rootPassword()
+                        + "\n";
 
-        trino = new GenericContainer<>(DockerImageName.parse("trinodb/trino:476"))
-                .withNetwork(network)
-                .withExposedPorts(TRINO_PORT)
-                .withFileSystemBind(pluginDir, "/usr/lib/trino/plugin/arangodb", BindMode.READ_ONLY)
-                .withCopyToContainer(Transferable.of(catalog), "/etc/trino/catalog/arango.properties")
-                // Trino answers HTTP while still starting and rejects queries during that window,
-                // so wait for /v1/info to report the server is done starting.
-                .waitingFor(Wait.forHttp("/v1/info").forPort(TRINO_PORT).forStatusCode(200)
-                        .forResponsePredicate(body -> body.contains("\"starting\":false"))
-                        .withStartupTimeout(Duration.ofMinutes(3)));
+        trino =
+                new GenericContainer<>(DockerImageName.parse("trinodb/trino:483"))
+                        .withNetwork(network)
+                        .withExposedPorts(TRINO_PORT)
+                        .withFileSystemBind(
+                                pluginDir, "/usr/lib/trino/plugin/arangodb", BindMode.READ_ONLY)
+                        .withCopyToContainer(
+                                Transferable.of(catalog), "/etc/trino/catalog/arango.properties")
+                        // Trino answers HTTP while still starting and rejects queries during that
+                        // window,
+                        // so wait for /v1/info to report the server is done starting.
+                        .waitingFor(
+                                Wait.forHttp("/v1/info")
+                                        .forPort(TRINO_PORT)
+                                        .forStatusCode(200)
+                                        .forResponsePredicate(
+                                                body -> body.contains("\"starting\":false"))
+                                        .withStartupTimeout(Duration.ofMinutes(3)));
         trino.start();
 
         // "starting":false only means the HTTP server is up; the coordinator's node manager
@@ -105,8 +124,8 @@ class PackagingSmokeIT {
         Exception lastFailure = null;
         while (System.nanoTime() < deadlineNanos) {
             try (Connection conn = connect();
-                 Statement st = conn.createStatement();
-                 ResultSet rs = st.executeQuery("SELECT count(*) FROM arango.shop.users")) {
+                    Statement st = conn.createStatement();
+                    ResultSet rs = st.executeQuery("SELECT count(*) FROM arango.shop.users")) {
                 if (rs.next()) {
                     return;
                 }
@@ -146,8 +165,8 @@ class PackagingSmokeIT {
     @Test
     void packagedPluginRegistersCatalog() throws Exception {
         try (Connection conn = connect();
-             Statement st = conn.createStatement();
-             ResultSet rs = st.executeQuery("SHOW CATALOGS")) {
+                Statement st = conn.createStatement();
+                ResultSet rs = st.executeQuery("SHOW CATALOGS")) {
             List<String> catalogs = new ArrayList<>();
             while (rs.next()) {
                 catalogs.add(rs.getString(1));
@@ -159,9 +178,9 @@ class PackagingSmokeIT {
     @Test
     void packagedPluginAnswersQuery() throws Exception {
         try (Connection conn = connect();
-             Statement st = conn.createStatement();
-             ResultSet rs = st.executeQuery(
-                     "SELECT name, age FROM arango.shop.users ORDER BY age")) {
+                Statement st = conn.createStatement();
+                ResultSet rs =
+                        st.executeQuery("SELECT name, age FROM arango.shop.users ORDER BY age")) {
             assertThat(rs.next()).isTrue();
             assertThat(rs.getString("name")).isEqualTo("ada");
             assertThat(rs.getLong("age")).isEqualTo(36L);
