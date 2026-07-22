@@ -11,7 +11,7 @@
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.release>24</maven.compiler.release>
-        <dep.trino.version>476</dep.trino.version>
+        <dep.trino.version>483</dep.trino.version>
         <dep.airlift.version>293</dep.airlift.version>
         <dep.arango.version>7.13.0</dep.arango.version>
         <dep.testcontainers.version>1.20.4</dep.testcontainers.version>
