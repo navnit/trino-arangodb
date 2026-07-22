@@ -774,4 +774,32 @@ class ArangoMetadataTest {
 
         assertThat(result).isEmpty();
     }
+
+    private static class ThrowingSchemaResolver extends SchemaResolver {
+        private final TrinoException exception;
+
+        ThrowingSchemaResolver(TrinoException exception) {
+            super(null, null, null);
+            this.exception = exception;
+        }
+
+        @Override
+        public List<ArangoColumn> resolveColumns(String database, CollectionInfo collection) {
+            throw exception;
+        }
+    }
+
+    @Test
+    void resolveUnwrapsLoaderExceptionToOriginalType() {
+        TrinoException originalException = new TrinoException(GENERIC_INTERNAL_ERROR, "boom");
+        ThrowingSchemaResolver resolver = new ThrowingSchemaResolver(originalException);
+        ArangoMetadata metadata = new ArangoMetadata(null, resolver, new ArangoConfig());
+        ArangoTableHandle handle =
+                new ArangoTableHandle(
+                        "shop", "users", false, TupleDomain.all(), OptionalLong.empty());
+
+        assertThatThrownBy(() -> metadata.getColumnHandles(null, handle))
+                .isInstanceOf(TrinoException.class)
+                .hasFieldOrPropertyWithValue("errorCode", GENERIC_INTERNAL_ERROR.toErrorCode());
+    }
 }
