@@ -15,7 +15,7 @@
         <dep.airlift.version>439</dep.airlift.version>
         <dep.arango.version>7.13.0</dep.arango.version>
         <dep.testcontainers.version>1.21.4</dep.testcontainers.version>
-        <dep.junit.version>5.11.3</dep.junit.version>
+        <dep.junit.version>6.1.2</dep.junit.version>
         <!-- Docker Remote API version handed to the Testcontainers-shaded docker-java
              client via the surefire api.version system property (see the long note on
              that property below). Kept as a property so it can be overridden per
