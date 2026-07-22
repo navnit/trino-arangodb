@@ -250,7 +250,7 @@
                 <groupId>io.trino</groupId>
                 <artifactId>trino-maven-plugin</artifactId>
                 <!-- Use the exact plugin version from Trino 483's root pom (>=15); verify at pin. -->
-                <version>20</version>
+                <version>24</version>
                 <extensions>true</extensions>
             </plugin>
             <plugin>
