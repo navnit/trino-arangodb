@@ -14,7 +14,7 @@
         <dep.trino.version>476</dep.trino.version>
         <dep.airlift.version>293</dep.airlift.version>
         <dep.arango.version>7.13.0</dep.arango.version>
-        <dep.testcontainers.version>1.20.4</dep.testcontainers.version>
+        <dep.testcontainers.version>1.21.4</dep.testcontainers.version>
         <dep.junit.version>5.11.3</dep.junit.version>
         <!-- Docker Remote API version handed to the Testcontainers-shaded docker-java
              client via the surefire api.version system property (see the long note on
