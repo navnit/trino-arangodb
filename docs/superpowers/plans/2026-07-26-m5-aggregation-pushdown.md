@@ -2593,6 +2593,14 @@ Update the "What this is" paragraph to say the milestone is M5 ("aggregation pus
 
 Document the new config option and which aggregates push (and which deliberately do not, with the one-line reason each: `min`/`max` on `VARCHAR` = collation; `sum`/`avg` on `BIGINT` = AQL's double accumulation).
 
+Also carry over the accepted limitations from design §10, since these are user-visible and belong in user-facing docs rather than only in a spec:
+
+- a `DOUBLE` `sum`/`avg` that overflows reads back as `0` rather than `Infinity` (JSON cannot carry non-finite doubles — the same root cause as the existing M2 `Infinity`/`NaN` note, so put it beside that one);
+- `sum`/`avg` over `DOUBLE` may differ in the last bits between the pushed and unpushed plan, because summation order differs;
+- `min`/`max` over a `DOUBLE` column holding both `-0.0` and `0.0` may differ in the returned zero's sign (the values are equal under SQL `=`);
+- `SELECT DISTINCT col ... LIMIT n` does not push (Trino plans it as `DistinctLimitNode`);
+- a `BIGINT`-range predicate may prevent aggregation pushdown — whatever Task 10 Step 2 actually observed.
+
 - [ ] **Step 3: Add the master-spec §6.4 note**
 
 In `docs/superpowers/specs/2026-07-18-arangodb-trino-connector-design.md` §6.4, immediately after "all of `COUNT`/`SUM`/`MIN`/`MAX`/`AVG` are safe to push":
