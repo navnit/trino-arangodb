@@ -70,7 +70,7 @@ Measured against **ArangoDB 3.12.4-3** (the version `TestingArangoServer` runs) 
 | 9 | `9223372036854775807 < 9223372036854775808` is `true` | ArangoDB compares int64-vs-double by **exact mathematical value** (the fact behind C1), so the long-range bound is exact rather than double-approximate |
 | 10 | Grouping on `-0.0` and `0.0` yields **two** groups; with `+ 0.0` applied, **one** | the existing C1 `+ 0.0` promotion is *required* for `DOUBLE` grouping keys, not merely nice — Trino normalizes `-0.0` to `0.0` when grouping |
 | 11 | Grouping on a stored `null` and on a **missing** attribute yields one shared group | matches Trino (both are `NULL`) |
-| 12 | Grouping on int `42` and double `42.0` yields one group; string `"42"` is separate | matches both the `BIGINT` and `DOUBLE` read paths |
+| 12 | Grouping on int `42` and double `42.0` yields one group; string `"42"` is separate. **This probe is vacuous on its own**: VelocyPack normalizes a stored `42.0` to int `42` at insert (`TO_STRING` returns `"42"`), so it never tested int-vs-double grouping — see §4/24 | matches both the `BIGINT` and `DOUBLE` read paths, but for the reason in §4/24 |
 | 13 | `AGGREGATE c = LENGTH(1)` produces the **same `CollectNode` plan** as `COLLECT WITH COUNT INTO c` | `count(*)` needs no special case; one uniform code path (master spec §6.4's `COLLECT WITH COUNT INTO` form is an equivalent, not a requirement) |
 | 14 | `SUM([1.797e308, 1.797e308])` = **`0`**, not `Infinity` | accepted limitation (§10) |
 | 15 | `SUM([2⁵³+1, 1])` = `9007199254740992.0`; `SUM([int64_max, int64_max])` silently = `1.8446744073709552e19` | AQL sums in double space ⇒ `sum(BIGINT)` is not claimable (§5) |
@@ -82,6 +82,7 @@ Measured against **ArangoDB 3.12.4-3** (the version `TestingArangoServer` runs) 
 | 21 | AQL `==` is **byte-exact**, not collation-based: `"ab" == "a­b"`, NFC `"é"` == NFD `"é"`, `"a" == "A"` are all `false`, and `COLLECT` keeps all seven test strings distinct under both methods | `VARCHAR` grouping keys are exact (review finding B2 refuted); independently confirms that **M2's already-shipped `VARCHAR` equality pushdown is sound** |
 | 22 | Rounding is monotone in practice: `MAX([2⁵³+1, 2⁵³+3])` bare, then promoted on read, equals the promoted `MAX` | the `+ 0.0` promotion is **not** needed for `min`/`max(DOUBLE)` (§7) |
 | 23 | `null > 0` is `false` | the `sum` empty-table fix-up `(aNn > 0 ? aN : null)` is load-bearing on this; pinned directly rather than derived from the ordering rule |
+| 24 | **`COLLECT` groups by numeric value, not by stored representation.** int64 `9007199254740992` and double `9007199254740992.0` — verified genuinely distinct in storage, since `TO_STRING` keeps the `.0` at this magnitude where it does not at `42` — land in **one** group under both methods | a `BIGINT` grouping key needs no representation canonicalizer beyond the signed-zero normalization; without this measurement the §4/12 evidence was ambiguous, and the alternative outcome would have been B1 over again |
 
 Probe 8's full guard, applied to a deliberately dirty column, keeps exactly `{42, 2⁵³+1, -(2⁵³+1), int64_max, int64_min, 0, 2⁵³-as-double}` and drops exactly `{42.5, -0.5, 1e19, -1e19, uint64_max, "x", true, null, missing}` — which is, value for value, `ValueMaterializer.isIntegralInLongRange`.
 
@@ -138,7 +139,7 @@ Rule 8's matrix is keyed by function name, so `AggregatePushdown` carries an **e
 
 `ColumnGuard` exposes two renderings per Trino type, both `Optional` (empty ⇒ decline):
 
-| Type | `predicate(accessor)` | `value` for `sum`/`avg` and grouping keys | `value` for `min`/`max` |
+| Type | `predicate(accessor)` | `value` for `sum`/`avg` (DOUBLE only) and grouping keys | `value` for `min`/`max` |
 |---|---|---|---|
 | `BOOLEAN` | `IS_BOOL(a)` | `a` | n/a (declined) |
 | `VARCHAR` | `IS_STRING(a)` | `a` | n/a (declined) |
