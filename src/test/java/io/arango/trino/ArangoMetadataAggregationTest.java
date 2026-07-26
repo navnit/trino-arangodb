@@ -57,10 +57,7 @@ class ArangoMetadataAggregationTest {
                 List.of(),
                 List.of(
                         new AggregateSpec(
-                                AggregateSpec.Kind.COUNT_STAR,
-                                Optional.empty(),
-                                "agg_0",
-                                BIGINT)));
+                                AggregateSpec.Kind.COUNT_STAR, Optional.empty(), "agg_0", BIGINT)));
     }
 
     private static ArangoTableHandle aggregatedHandle() {
@@ -68,7 +65,8 @@ class ArangoMetadataAggregationTest {
     }
 
     private static AggregateFunction countStar() {
-        return new AggregateFunction("count", BIGINT, List.of(), List.of(), false, Optional.empty());
+        return new AggregateFunction(
+                "count", BIGINT, List.of(), List.of(), false, Optional.empty());
     }
 
     @Test

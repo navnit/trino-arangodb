@@ -302,7 +302,12 @@ class ArangoMetadataTest {
         ArangoMetadata metadata = new ArangoMetadata(null, resolver, new ArangoConfig());
         ArangoTableHandle handle =
                 new ArangoTableHandle(
-                        "shop", "users", false, TupleDomain.all(), OptionalLong.empty(), Optional.empty());
+                        "shop",
+                        "users",
+                        false,
+                        TupleDomain.all(),
+                        OptionalLong.empty(),
+                        Optional.empty());
 
         ConnectorTableMetadata tableMetadata = metadata.getTableMetadata(null, handle);
         Map<String, ColumnHandle> columnHandles = metadata.getColumnHandles(null, handle);
@@ -334,7 +339,12 @@ class ArangoMetadataTest {
         ArangoMetadata metadata = new ArangoMetadata(null, resolver, config, ticker);
         ArangoTableHandle handle =
                 new ArangoTableHandle(
-                        "shop", "users", false, TupleDomain.all(), OptionalLong.empty(), Optional.empty());
+                        "shop",
+                        "users",
+                        false,
+                        TupleDomain.all(),
+                        OptionalLong.empty(),
+                        Optional.empty());
 
         metadata.getColumnHandles(null, handle);
         metadata.getColumnHandles(null, handle);
@@ -352,7 +362,12 @@ class ArangoMetadataTest {
         ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ArangoTableHandle handle =
                 new ArangoTableHandle(
-                        "shop", "users", false, TupleDomain.all(), OptionalLong.empty(), Optional.empty());
+                        "shop",
+                        "users",
+                        false,
+                        TupleDomain.all(),
+                        OptionalLong.empty(),
+                        Optional.empty());
         ArangoColumnHandle active =
                 new ArangoColumnHandle("active", BOOLEAN, false, List.of("active"));
         Constraint constraint =
@@ -375,7 +390,12 @@ class ArangoMetadataTest {
         ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ArangoTableHandle handle =
                 new ArangoTableHandle(
-                        "shop", "users", false, TupleDomain.all(), OptionalLong.empty(), Optional.empty());
+                        "shop",
+                        "users",
+                        false,
+                        TupleDomain.all(),
+                        OptionalLong.empty(),
+                        Optional.empty());
         ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, List.of("age"));
         Constraint constraint =
                 new Constraint(
@@ -394,7 +414,12 @@ class ArangoMetadataTest {
         ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ArangoTableHandle handle =
                 new ArangoTableHandle(
-                        "shop", "users", false, TupleDomain.all(), OptionalLong.empty(), Optional.empty());
+                        "shop",
+                        "users",
+                        false,
+                        TupleDomain.all(),
+                        OptionalLong.empty(),
+                        Optional.empty());
         ArangoColumnHandle name = new ArangoColumnHandle("name", VARCHAR, false, List.of("name"));
         Constraint constraint =
                 new Constraint(
@@ -413,7 +438,12 @@ class ArangoMetadataTest {
         ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ArangoTableHandle handle =
                 new ArangoTableHandle(
-                        "shop", "users", false, TupleDomain.all(), OptionalLong.empty(), Optional.empty());
+                        "shop",
+                        "users",
+                        false,
+                        TupleDomain.all(),
+                        OptionalLong.empty(),
+                        Optional.empty());
         ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, List.of("age"));
         Domain range = Domain.create(ValueSet.ofRanges(Range.greaterThan(BIGINT, 30L)), false);
         Constraint constraint = new Constraint(TupleDomain.withColumnDomains(Map.of(age, range)));
@@ -433,7 +463,12 @@ class ArangoMetadataTest {
         ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ArangoTableHandle handle =
                 new ArangoTableHandle(
-                        "shop", "prices", false, TupleDomain.all(), OptionalLong.empty(), Optional.empty());
+                        "shop",
+                        "prices",
+                        false,
+                        TupleDomain.all(),
+                        OptionalLong.empty(),
+                        Optional.empty());
         ArangoColumnHandle amount =
                 new ArangoColumnHandle("amount", DOUBLE, false, List.of("amount"));
         Domain range = Domain.create(ValueSet.ofRanges(Range.greaterThan(DOUBLE, 9.99)), false);
@@ -455,7 +490,12 @@ class ArangoMetadataTest {
                         new ArangoConfig().setTypeCoercion(ArangoConfig.TypeCoercion.STRICT));
         ArangoTableHandle handle =
                 new ArangoTableHandle(
-                        "shop", "users", false, TupleDomain.all(), OptionalLong.empty(), Optional.empty());
+                        "shop",
+                        "users",
+                        false,
+                        TupleDomain.all(),
+                        OptionalLong.empty(),
+                        Optional.empty());
         ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, List.of("age"));
         Constraint constraint =
                 new Constraint(
@@ -469,7 +509,12 @@ class ArangoMetadataTest {
         ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ArangoTableHandle handle =
                 new ArangoTableHandle(
-                        "shop", "users", false, TupleDomain.all(), OptionalLong.empty(), Optional.empty());
+                        "shop",
+                        "users",
+                        false,
+                        TupleDomain.all(),
+                        OptionalLong.empty(),
+                        Optional.empty());
         ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, List.of("age"));
         Domain nullableRestricted =
                 Domain.create(io.trino.spi.predicate.ValueSet.of(BIGINT, 30L), true);
@@ -491,7 +536,12 @@ class ArangoMetadataTest {
         ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ArangoTableHandle handle =
                 new ArangoTableHandle(
-                        "shop", "users", false, TupleDomain.all(), OptionalLong.empty(), Optional.empty());
+                        "shop",
+                        "users",
+                        false,
+                        TupleDomain.all(),
+                        OptionalLong.empty(),
+                        Optional.empty());
         ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, List.of("age"));
         Constraint constraint =
                 new Constraint(TupleDomain.withColumnDomains(Map.of(age, Domain.onlyNull(BIGINT))));
@@ -507,7 +557,12 @@ class ArangoMetadataTest {
         ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ArangoTableHandle handle =
                 new ArangoTableHandle(
-                        "shop", "users", false, TupleDomain.all(), OptionalLong.empty(), Optional.empty());
+                        "shop",
+                        "users",
+                        false,
+                        TupleDomain.all(),
+                        OptionalLong.empty(),
+                        Optional.empty());
         ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, List.of("age"));
         Constraint constraint =
                 new Constraint(TupleDomain.withColumnDomains(Map.of(age, Domain.notNull(BIGINT))));
@@ -529,7 +584,13 @@ class ArangoMetadataTest {
         TupleDomain<ColumnHandle> alreadyPushed =
                 TupleDomain.withColumnDomains(Map.of(active, Domain.singleValue(BOOLEAN, true)));
         ArangoTableHandle handle =
-                new ArangoTableHandle("shop", "users", false, alreadyPushed, OptionalLong.empty(), Optional.empty());
+                new ArangoTableHandle(
+                        "shop",
+                        "users",
+                        false,
+                        alreadyPushed,
+                        OptionalLong.empty(),
+                        Optional.empty());
         Constraint sameConstraint = new Constraint(alreadyPushed);
 
         Optional<ConstraintApplicationResult<ConnectorTableHandle>> result =
@@ -547,7 +608,12 @@ class ArangoMetadataTest {
                         null, null, new ArangoConfig().setShardParallelismEnabled(false));
         ArangoTableHandle handle =
                 new ArangoTableHandle(
-                        "shop", "users", false, TupleDomain.all(), OptionalLong.empty(), Optional.empty());
+                        "shop",
+                        "users",
+                        false,
+                        TupleDomain.all(),
+                        OptionalLong.empty(),
+                        Optional.empty());
 
         Optional<LimitApplicationResult<ConnectorTableHandle>> result =
                 metadata.applyLimit(null, handle, 10L);
@@ -563,7 +629,12 @@ class ArangoMetadataTest {
         ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ArangoTableHandle handle =
                 new ArangoTableHandle(
-                        "shop", "users", false, TupleDomain.all(), OptionalLong.of(5L), Optional.empty());
+                        "shop",
+                        "users",
+                        false,
+                        TupleDomain.all(),
+                        OptionalLong.of(5L),
+                        Optional.empty());
 
         Optional<LimitApplicationResult<ConnectorTableHandle>> result =
                 metadata.applyLimit(null, handle, 10L);
@@ -580,7 +651,12 @@ class ArangoMetadataTest {
                         null, null, new ArangoConfig().setShardParallelismEnabled(false));
         ArangoTableHandle handle =
                 new ArangoTableHandle(
-                        "shop", "users", false, TupleDomain.all(), OptionalLong.of(10L), Optional.empty());
+                        "shop",
+                        "users",
+                        false,
+                        TupleDomain.all(),
+                        OptionalLong.of(10L),
+                        Optional.empty());
 
         Optional<LimitApplicationResult<ConnectorTableHandle>> result =
                 metadata.applyLimit(null, handle, 5L);
@@ -596,7 +672,12 @@ class ArangoMetadataTest {
         ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ArangoTableHandle handle =
                 new ArangoTableHandle(
-                        "shop", "users", false, TupleDomain.all(), OptionalLong.of(10L), Optional.empty());
+                        "shop",
+                        "users",
+                        false,
+                        TupleDomain.all(),
+                        OptionalLong.of(10L),
+                        Optional.empty());
 
         Optional<LimitApplicationResult<ConnectorTableHandle>> result =
                 metadata.applyLimit(null, handle, 10L);
@@ -609,7 +690,12 @@ class ArangoMetadataTest {
         ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ArangoTableHandle handle =
                 new ArangoTableHandle(
-                        "shop", "users", false, TupleDomain.all(), OptionalLong.empty(), Optional.empty());
+                        "shop",
+                        "users",
+                        false,
+                        TupleDomain.all(),
+                        OptionalLong.empty(),
+                        Optional.empty());
         RowType addressType =
                 RowType.rowType(RowType.field("city", VARCHAR), RowType.field("zip", VARCHAR));
         ArangoColumnHandle addressColumn =
@@ -638,7 +724,12 @@ class ArangoMetadataTest {
         ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ArangoTableHandle handle =
                 new ArangoTableHandle(
-                        "shop", "users", false, TupleDomain.all(), OptionalLong.empty(), Optional.empty());
+                        "shop",
+                        "users",
+                        false,
+                        TupleDomain.all(),
+                        OptionalLong.empty(),
+                        Optional.empty());
         ArangoColumnHandle ageColumn = new ArangoColumnHandle("age", BIGINT, false, List.of("age"));
         // FieldDereference's constructor requires its target's declared type to already be a
         // RowType (it unconditionally casts target.getType() to RowType), so ageVar can't be
@@ -660,7 +751,12 @@ class ArangoMetadataTest {
         ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ArangoTableHandle handle =
                 new ArangoTableHandle(
-                        "shop", "users", false, TupleDomain.all(), OptionalLong.empty(), Optional.empty());
+                        "shop",
+                        "users",
+                        false,
+                        TupleDomain.all(),
+                        OptionalLong.empty(),
+                        Optional.empty());
         ArangoColumnHandle nameColumn =
                 new ArangoColumnHandle("name", VARCHAR, false, List.of("name"));
         Variable nameVar = new Variable("name_0", VARCHAR);
@@ -677,7 +773,12 @@ class ArangoMetadataTest {
         ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ArangoTableHandle handle =
                 new ArangoTableHandle(
-                        "shop", "users", false, TupleDomain.all(), OptionalLong.empty(), Optional.empty());
+                        "shop",
+                        "users",
+                        false,
+                        TupleDomain.all(),
+                        OptionalLong.empty(),
+                        Optional.empty());
         RowType addressType = RowType.rowType(RowType.field("city", VARCHAR));
         ArangoColumnHandle addressColumn =
                 new ArangoColumnHandle("address", addressType, false, List.of("address"));
@@ -706,7 +807,12 @@ class ArangoMetadataTest {
         ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ArangoTableHandle handle =
                 new ArangoTableHandle(
-                        "shop", "users", false, TupleDomain.all(), OptionalLong.empty(), Optional.empty());
+                        "shop",
+                        "users",
+                        false,
+                        TupleDomain.all(),
+                        OptionalLong.empty(),
+                        Optional.empty());
         RowType addressType = RowType.rowType(RowType.field("city", VARCHAR));
         Variable unknownVar = new Variable("ghost_0", addressType);
         FieldDereference cityDeref = new FieldDereference(VARCHAR, unknownVar, 0);
@@ -723,7 +829,12 @@ class ArangoMetadataTest {
         ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ArangoTableHandle handle =
                 new ArangoTableHandle(
-                        "shop", "users", false, TupleDomain.all(), OptionalLong.empty(), Optional.empty());
+                        "shop",
+                        "users",
+                        false,
+                        TupleDomain.all(),
+                        OptionalLong.empty(),
+                        Optional.empty());
         RowType addressType = RowType.rowType(RowType.field("city", VARCHAR));
         ArangoColumnHandle addressColumn =
                 new ArangoColumnHandle("address", addressType, false, List.of("address"));
@@ -757,7 +868,12 @@ class ArangoMetadataTest {
         ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
         ArangoTableHandle handle =
                 new ArangoTableHandle(
-                        "shop", "users", false, TupleDomain.all(), OptionalLong.empty(), Optional.empty());
+                        "shop",
+                        "users",
+                        false,
+                        TupleDomain.all(),
+                        OptionalLong.empty(),
+                        Optional.empty());
         RowType geoType =
                 RowType.rowType(RowType.field("lat", DOUBLE), RowType.field("lng", DOUBLE));
         RowType addressType =
@@ -796,7 +912,12 @@ class ArangoMetadataTest {
         ArangoMetadata metadata = new ArangoMetadata(null, resolver, new ArangoConfig());
         ArangoTableHandle handle =
                 new ArangoTableHandle(
-                        "shop", "users", false, TupleDomain.all(), OptionalLong.empty(), Optional.empty());
+                        "shop",
+                        "users",
+                        false,
+                        TupleDomain.all(),
+                        OptionalLong.empty(),
+                        Optional.empty());
 
         assertThatThrownBy(() -> metadata.getColumnHandles(null, handle))
                 .isInstanceOf(TrinoException.class)

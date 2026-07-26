@@ -292,8 +292,9 @@ class AqlSemanticsAssumptionsTest {
     // carry non-finite doubles. Accepted limitation (design §10/1), pinned so it stays visible.
     @Test
     void doubleSumOverflowReadsAsZeroNotInfinity() {
-        assertThat(((Number) eval("SUM([1.7976931348623157e308, 1.7976931348623157e308])"))
-                        .doubleValue())
+        assertThat(
+                        ((Number) eval("SUM([1.7976931348623157e308, 1.7976931348623157e308])"))
+                                .doubleValue())
                 .isEqualTo(0.0);
     }
 
@@ -379,8 +380,10 @@ class AqlSemanticsAssumptionsTest {
     // (promotion would turn a stored -0.0 into 0.0; review finding S1).
     @Test
     void bareExtremumThenRoundingEqualsPromotedExtremum() {
-        assertThat(eval("(MAX([9007199254740993, 9007199254740995]) + 0.0) =="
-                        + " MAX([9007199254740993 + 0.0, 9007199254740995 + 0.0])"))
+        assertThat(
+                        eval(
+                                "(MAX([9007199254740993, 9007199254740995]) + 0.0) =="
+                                        + " MAX([9007199254740993 + 0.0, 9007199254740995 + 0.0])"))
                 .isEqualTo(true);
     }
 

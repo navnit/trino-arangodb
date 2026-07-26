@@ -109,7 +109,8 @@ public class ArangoMetadata implements ConnectorMetadata {
                                             c.name(),
                                             c.isEdge(),
                                             TupleDomain.all(),
-                                            OptionalLong.empty(), Optional.empty()))
+                                            OptionalLong.empty(),
+                                            Optional.empty()))
                     .orElse(null); // null => table not found (Trino throws)
         } catch (ArangoDBException e) {
             if (isDatabaseNotFound(e)) {
@@ -378,7 +379,8 @@ public class ArangoMetadata implements ConnectorMetadata {
             Map<String, ColumnHandle> assignments) {
         // Explicit rather than incidental: today the !progress exit below happens to catch this,
         // because every aggregate output and grouping key is scalar so no FieldDereference can
-        // resolve against one. That is safety by coincidence -- a later widening of the grouping-key
+        // resolve against one. That is safety by coincidence -- a later widening of the
+        // grouping-key
         // matrix to structured types would turn it into a dereference pushed at a COLLECT variable.
         if (((ArangoTableHandle) table).aggregation().isPresent()) {
             return Optional.empty();

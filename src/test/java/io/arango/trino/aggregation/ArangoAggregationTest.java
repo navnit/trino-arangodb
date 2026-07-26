@@ -18,8 +18,7 @@ class ArangoAggregationTest {
     @Test
     void countStarCarriesNoInputColumn() {
         AggregateSpec spec =
-                new AggregateSpec(
-                        AggregateSpec.Kind.COUNT_STAR, Optional.empty(), "agg_0", BIGINT);
+                new AggregateSpec(AggregateSpec.Kind.COUNT_STAR, Optional.empty(), "agg_0", BIGINT);
         assertThat(spec.input()).isEmpty();
         assertThat(spec.outputType()).isEqualTo(BIGINT);
     }

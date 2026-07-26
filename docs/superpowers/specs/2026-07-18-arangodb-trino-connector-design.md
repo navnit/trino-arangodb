@@ -234,6 +234,8 @@ Predicates the builder can express (with guards) are reported **handled** and re
   - `COUNT(*)` → `COLLECT WITH COUNT INTO c RETURN c`
   - grouped → `COLLECT g = d.<key> AGGREGATE s = SUM(d.<x>), a = AVERAGE(d.<y>), mn = MIN(d.<z>) RETURN {g, s, a, mn}`
 - Only aggregations whose inputs are pushable column paths are claimed; otherwise decline and let Trino aggregate.
+> **Note (2026-07-26, M5).** The "all five are safe" claim above reasons about **re-aggregation only** — single-split execution means no partial/final decomposition is needed, so `AVG` needs no partial state. It says nothing about *value coercion*, and M5 found that two of the five cannot be pushed exactly: `sum`/`avg` over `BIGINT` (AQL accumulates sums in double, losing precision past 2⁵³ and silencing Trino's `sum(bigint)` overflow error) and `min`/`max` over `VARCHAR` (ArangoDB orders strings by the server's collation, Trino by codepoint — the same reason §6.1 declines string range). See `2026-07-26-m5-aggregation-pushdown-design.md` §5 for the governing matrix.
+
 - `DISTINCT` aggregates and `HAVING`/complex grouping-set forms are out of scope for v1 (declined).
 
 ### 6.5 AQL generation example

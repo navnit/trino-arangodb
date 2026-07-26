@@ -24,8 +24,8 @@ import java.util.Set;
  *
  * <p>The bar is higher than for filters. {@code applyFilter} may push a prefilter and let Trino
  * re-check the residual; aggregation has no residual, because Trino replaces the aggregation node
- * and treats the connector's output as final. Anything claimed here must therefore be exactly
- * right -- a wrong aggregate is simply a wrong answer.
+ * and treats the connector's output as final. Anything claimed here must therefore be exactly right
+ * -- a wrong aggregate is simply a wrong answer.
  */
 public final class AggregatePushdown {
     private AggregatePushdown() {}
@@ -58,12 +58,18 @@ public final class AggregatePushdown {
         if (handle.limit().isPresent()) {
             return Optional.empty();
         }
-        // A prefilter-only domain is enforced jointly by the pushed AQL and Trino's residual
-        // re-check. Aggregating over the AQL side alone would include rows -- fractional or
-        // out-of-long-range values in the filter column -- that the residual would have dropped.
-        // Trino's planner is not expected to offer this shape (a residual leaves a FilterNode,
-        // which PushAggregationIntoTableScan does not match), but this makes the guarantee local
-        // rather than dependent on that rule's pattern surviving a Trino upgrade.
+        // A prefilter-only domain (BIGINT range) is enforced JOINTLY by the pushed AQL and Trino's
+        // residual re-check. Aggregating over the AQL side alone would include rows -- fractional
+        // or out-of-long-range values in the filter column -- that the residual drops, so the
+        // aggregate would be silently wrong.
+        //
+        // This decline is load-bearing, not defensive. It is tempting to assume Trino would never
+        // offer this shape, on the grounds that a residual leaves a FilterNode that
+        // PushAggregationIntoTableScan will not match. Measured plans say otherwise: Trino fuses
+        // the predicate into a ScanFilterProject and pushes the aggregate straight through it (see
+        // ArangoConnectorAggregationTest.residualFilterInteractionIsPinned, where the fully
+        // enforced DOUBLE-range case IS fully pushed down). Nothing but this check stands between
+        // a BIGINT-range filter and a wrong count.
         if (hasPrefilterOnlyDomain(handle)) {
             return Optional.empty();
         }
@@ -162,17 +168,17 @@ public final class AggregatePushdown {
         // (approx_distinct, count_if, arbitrary, ...) declines by construction.
         AggregateSpec.Kind kind =
                 switch (name) {
-                        // count needs only a guard predicate: no ordering, no accumulation.
+                    // count needs only a guard predicate: no ordering, no accumulation.
                     case "count" ->
                             ColumnGuard.predicate(type, TYPE_PROBE_ACCESSOR).isPresent()
                                     ? AggregateSpec.Kind.COUNT_COLUMN
                                     : null;
-                        // min/max compare, so VARCHAR is out (server collation vs Trino codepoint)
-                        // and BOOLEAN is out by scope decision.
+                    // min/max compare, so VARCHAR is out (server collation vs Trino codepoint)
+                    // and BOOLEAN is out by scope decision.
                     case "min" -> isMinMaxable(type) ? AggregateSpec.Kind.MIN : null;
                     case "max" -> isMinMaxable(type) ? AggregateSpec.Kind.MAX : null;
-                        // sum/avg accumulate, and AQL accumulates in double: BIGINT would lose
-                        // precision past 2^53 and turn Trino's loud overflow into a silent one.
+                    // sum/avg accumulate, and AQL accumulates in double: BIGINT would lose
+                    // precision past 2^53 and turn Trino's loud overflow into a silent one.
                     case "sum" -> type.equals(DoubleType.DOUBLE) ? AggregateSpec.Kind.SUM : null;
                     case "avg" -> type.equals(DoubleType.DOUBLE) ? AggregateSpec.Kind.AVG : null;
                     default -> null;

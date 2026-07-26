@@ -58,7 +58,8 @@ class ShardParallelCorrectnessIT {
 
     private static ArangoTableHandle handle() {
         // 5-arg record: (schema, table, edge, constraint, limit).
-        return new ArangoTableHandle(DB, COLL, false, TupleDomain.all(), OptionalLong.empty(), Optional.empty());
+        return new ArangoTableHandle(
+                DB, COLL, false, TupleDomain.all(), OptionalLong.empty(), Optional.empty());
     }
 
     private static List<ArangoSplit> splits(ArangoConfig config) {

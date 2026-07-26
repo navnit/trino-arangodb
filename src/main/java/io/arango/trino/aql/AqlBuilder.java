@@ -126,13 +126,13 @@ public class AqlBuilder {
                                     + coerceOrThrow(
                                             inputType, accessor, ColumnGuard.Purpose.SUM_AVG)
                                     + ")");
-                    aggregateTerms.add(companion + " = SUM(" + countTerm(inputType, accessor) + ")");
+                    aggregateTerms.add(
+                            companion + " = SUM(" + countTerm(inputType, accessor) + ")");
                     // AQL SUM of an all-null group is 0 where SQL says NULL; the companion count
                     // distinguishes them. `null > 0` is false, so an empty table -- where the
                     // companion itself is null -- also yields NULL, as SQL requires.
                     returnExpressions.put(
-                            spec.outputName(),
-                            "(" + companion + " > 0 ? " + variable + " : null)");
+                            spec.outputName(), "(" + companion + " > 0 ? " + variable + " : null)");
                 }
                 case AVG -> {
                     aggregateTerms.add(

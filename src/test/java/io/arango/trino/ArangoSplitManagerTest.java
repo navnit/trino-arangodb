@@ -3,24 +3,24 @@ package io.arango.trino;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.arango.trino.aggregation.AggregateSpec;
+import io.arango.trino.aggregation.ArangoAggregation;
 import io.arango.trino.client.ArangoClient;
 import io.arango.trino.handle.ArangoSplit;
 import io.arango.trino.handle.ArangoTableHandle;
-import io.arango.trino.aggregation.AggregateSpec;
-import io.arango.trino.aggregation.ArangoAggregation;
 import io.arango.trino.split.ShardFanoutCapability;
 import io.arango.trino.split.ShardingInfo;
-import io.trino.spi.type.BigintType;
 import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.DynamicFilterSnapshot;
+import io.trino.spi.type.BigintType;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-import java.util.Optional;
 
 class ArangoSplitManagerTest {
     private static TestingArangoServer server;
@@ -57,7 +57,8 @@ class ArangoSplitManagerTest {
                 COLL,
                 false,
                 io.trino.spi.predicate.TupleDomain.all(),
-                java.util.OptionalLong.empty(), Optional.empty());
+                java.util.OptionalLong.empty(),
+                Optional.empty());
     }
 
     private static List<ArangoSplit> collect(ArangoSplitManager mgr) {

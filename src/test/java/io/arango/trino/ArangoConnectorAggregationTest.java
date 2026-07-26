@@ -75,10 +75,14 @@ class ArangoConnectorAggregationTest extends AbstractTestQueryFramework {
         runner.installPlugin(new ArangoPlugin());
         Map<String, String> base =
                 ImmutableMap.of(
-                        "arangodb.hosts", server.hostPort(),
-                        "arangodb.user", "root",
-                        "arangodb.password", server.rootPassword(),
-                        "arangodb.schema.sample-size", "2");
+                        "arangodb.hosts",
+                        server.hostPort(),
+                        "arangodb.user",
+                        "root",
+                        "arangodb.password",
+                        server.rootPassword(),
+                        "arangodb.schema.sample-size",
+                        "2");
         runner.createCatalog("arango", "arangodb", base);
         runner.createCatalog(
                 "noagg",
@@ -135,8 +139,7 @@ class ArangoConnectorAggregationTest extends AbstractTestQueryFramework {
         assertSameAsReference("SELECT count(*) FROM %s.sales WHERE qty > 4");
         assertThat(query("SELECT count(*) FROM arango.agg.sales WHERE qty > 4"))
                 .matches("VALUES BIGINT '2'")
-                .isNotFullyPushedDown(
-                        AggregationNode.class, ProjectNode.class, FilterNode.class);
+                .isNotFullyPushedDown(AggregationNode.class, ProjectNode.class, FilterNode.class);
     }
 
     @Test
@@ -188,7 +191,9 @@ class ArangoConnectorAggregationTest extends AbstractTestQueryFramework {
         assertThat(empty.getMaterializedRows().get(0).getField(0)).isEqualTo(0L);
         assertThat(empty.getMaterializedRows().get(0).getField(1)).isEqualTo(0L);
         assertThat(empty.getMaterializedRows().get(0).getField(2)).isNull();
-        assertThat(query("SELECT count(price), sum(price) FROM arango.agg.sales WHERE price = 999.0"))
+        assertThat(
+                        query(
+                                "SELECT count(price), sum(price) FROM arango.agg.sales WHERE price = 999.0"))
                 .isFullyPushedDown();
 
         // Group "c" holds only nulls: count = 0, sum = NULL.

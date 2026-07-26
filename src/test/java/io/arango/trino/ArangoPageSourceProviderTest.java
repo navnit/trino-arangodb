@@ -115,7 +115,12 @@ class ArangoPageSourceProviderTest {
     void scanReturnsTypedValuesAndNullsForMissingFields() throws Exception {
         ArangoTableHandle handle =
                 new ArangoTableHandle(
-                        "shop", "items", false, TupleDomain.all(), OptionalLong.empty(), Optional.empty());
+                        "shop",
+                        "items",
+                        false,
+                        TupleDomain.all(),
+                        OptionalLong.empty(),
+                        Optional.empty());
         List<ColumnHandle> columns =
                 List.of(
                         new ArangoColumnHandle("_key", VARCHAR, false, List.of("_key")),
@@ -193,7 +198,12 @@ class ArangoPageSourceProviderTest {
     void edgeFromAndToColumnsRoundTripThroughDriverProperties() throws Exception {
         ArangoTableHandle handle =
                 new ArangoTableHandle(
-                        "shop", "knows", true, TupleDomain.all(), OptionalLong.empty(), Optional.empty());
+                        "shop",
+                        "knows",
+                        true,
+                        TupleDomain.all(),
+                        OptionalLong.empty(),
+                        Optional.empty());
         List<ColumnHandle> columns =
                 List.of(
                         new ArangoColumnHandle("_key", VARCHAR, false, List.of("_key")),
@@ -241,7 +251,12 @@ class ArangoPageSourceProviderTest {
 
         ArangoTableHandle handle =
                 new ArangoTableHandle(
-                        "shop", "tagged", false, TupleDomain.all(), OptionalLong.empty(), Optional.empty());
+                        "shop",
+                        "tagged",
+                        false,
+                        TupleDomain.all(),
+                        OptionalLong.empty(),
+                        Optional.empty());
         ArangoColumnHandle col =
                 new ArangoColumnHandle("tags", new ArrayType(VARCHAR), false, List.of("tags"));
         ArangoPageSourceProvider provider =
@@ -284,7 +299,12 @@ class ArangoPageSourceProviderTest {
     void createPageSourceProjectsOnlyRequestedColumns() throws Exception {
         ArangoTableHandle handle =
                 new ArangoTableHandle(
-                        "shop", "items", false, TupleDomain.all(), OptionalLong.empty(), Optional.empty());
+                        "shop",
+                        "items",
+                        false,
+                        TupleDomain.all(),
+                        OptionalLong.empty(),
+                        Optional.empty());
         List<ColumnHandle> columns =
                 List.of(new ArangoColumnHandle("name", VARCHAR, false, List.of("name")));
 
@@ -360,7 +380,12 @@ class ArangoPageSourceProviderTest {
             throws Exception {
         ArangoTableHandle handle =
                 new ArangoTableHandle(
-                        "shop", collection, false, TupleDomain.all(), OptionalLong.empty(), Optional.empty());
+                        "shop",
+                        collection,
+                        false,
+                        TupleDomain.all(),
+                        OptionalLong.empty(),
+                        Optional.empty());
         ArangoPageSourceProvider provider =
                 new ArangoPageSourceProvider(client, new AqlBuilder(), config);
         ConnectorPageSource source =

@@ -31,10 +31,10 @@ public final class ColumnGuard {
      *   <li>{@code SUM_AVG} -- DOUBLE keeps the {@code + 0.0} promotion, which is the M2 finding-C1
      *       argument unchanged: it makes AQL accumulate in the same double space the read path's
      *       {@code doubleValue()} produces.
-     *   <li>{@code MIN_MAX} -- bare accessor. Promotion would turn a stored {@code -0.0} into {@code
-     *       0.0} and disagree with the unpushed plan, and it is unnecessary because double rounding
-     *       is monotone: the bare extremum, rounded on read, equals the extremum of the rounded
-     *       values (design §4/22).
+     *   <li>{@code MIN_MAX} -- bare accessor. Promotion would turn a stored {@code -0.0} into
+     *       {@code 0.0} and disagree with the unpushed plan, and it is unnecessary because double
+     *       rounding is monotone: the bare extremum, rounded on read, equals the extremum of the
+     *       rounded values (design §4/22).
      * </ul>
      */
     public enum Purpose {

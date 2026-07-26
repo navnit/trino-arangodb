@@ -152,7 +152,8 @@ class AggregatePushdownTest {
     void declinesUnderStrictCoercion() {
         assertThat(
                         AggregatePushdown.plan(
-                                new ArangoConfig().setTypeCoercion(ArangoConfig.TypeCoercion.STRICT),
+                                new ArangoConfig()
+                                        .setTypeCoercion(ArangoConfig.TypeCoercion.STRICT),
                                 handle(),
                                 List.of(fn("count", BIGINT, null)),
                                 ASSIGNMENTS,

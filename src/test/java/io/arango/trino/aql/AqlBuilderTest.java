@@ -25,7 +25,12 @@ import org.junit.jupiter.api.Test;
 class AqlBuilderTest {
     private static ArangoTableHandle unconstrainedHandle() {
         return new ArangoTableHandle(
-                "shop", "users", false, TupleDomain.<ColumnHandle>all(), OptionalLong.empty(), Optional.empty());
+                "shop",
+                "users",
+                false,
+                TupleDomain.<ColumnHandle>all(),
+                OptionalLong.empty(),
+                Optional.empty());
     }
 
     @Test
@@ -60,7 +65,8 @@ class AqlBuilderTest {
                 "users",
                 false,
                 TupleDomain.withColumnDomains(domains),
-                OptionalLong.empty(), Optional.empty());
+                OptionalLong.empty(),
+                Optional.empty());
     }
 
     @Test
@@ -116,7 +122,8 @@ class AqlBuilderTest {
                                         Domain.create(
                                                 ValueSet.ofRanges(Range.greaterThan(BIGINT, 30L)),
                                                 false))),
-                        OptionalLong.empty(), Optional.empty());
+                        OptionalLong.empty(),
+                        Optional.empty());
         AqlQuery q = new AqlBuilder().buildScan(handle, List.of(age));
         assertThat(q.aql())
                 .isEqualTo(
@@ -146,7 +153,8 @@ class AqlBuilderTest {
                                                 ValueSet.ofRanges(
                                                         Range.lessThanOrEqual(DOUBLE, 9.99)),
                                                 false))),
-                        OptionalLong.empty(), Optional.empty());
+                        OptionalLong.empty(),
+                        Optional.empty());
         AqlQuery q = new AqlBuilder().buildScan(handle, List.of(price));
         assertThat(q.aql())
                 .isEqualTo(
@@ -170,7 +178,8 @@ class AqlBuilderTest {
                         false,
                         TupleDomain.withColumnDomains(
                                 Map.of(price, Domain.create(ValueSet.of(DOUBLE, 20.0), false))),
-                        OptionalLong.empty(), Optional.empty());
+                        OptionalLong.empty(),
+                        Optional.empty());
         AqlQuery q = new AqlBuilder().buildScan(handle, List.of(price));
         assertThat(q.aql())
                 .isEqualTo(
@@ -194,7 +203,8 @@ class AqlBuilderTest {
                                                 ValueSet.ofRanges(
                                                         Range.range(BIGINT, 10L, true, 20L, false)),
                                                 false))),
-                        OptionalLong.empty(), Optional.empty());
+                        OptionalLong.empty(),
+                        Optional.empty());
         AqlQuery q = new AqlBuilder().buildScan(handle, List.of(age));
         assertThat(q.aql())
                 .isEqualTo(
@@ -219,7 +229,8 @@ class AqlBuilderTest {
                                                         Range.lessThan(BIGINT, 10L),
                                                         Range.greaterThan(BIGINT, 20L)),
                                                 false))),
-                        OptionalLong.empty(), Optional.empty());
+                        OptionalLong.empty(),
+                        Optional.empty());
         AqlQuery q = new AqlBuilder().buildScan(handle, List.of(age));
         assertThat(q.aql())
                 .isEqualTo(
@@ -270,7 +281,8 @@ class AqlBuilderTest {
                         false,
                         TupleDomain.withColumnDomains(
                                 ImmutableMap.of(age, Domain.singleValue(BIGINT, 30L))),
-                        OptionalLong.of(5L), Optional.empty());
+                        OptionalLong.of(5L),
+                        Optional.empty());
         AqlQuery q = new AqlBuilder().buildScan(handle, List.of(age));
         assertThat(q.aql())
                 .isEqualTo(
@@ -287,7 +299,8 @@ class AqlBuilderTest {
                                         "users",
                                         false,
                                         TupleDomain.all(),
-                                        OptionalLong.of(10L), Optional.empty()),
+                                        OptionalLong.of(10L),
+                                        Optional.empty()),
                                 List.of());
         assertThat(q.aql()).isEqualTo("FOR d IN @@col LIMIT 10 RETURN {}");
     }
