@@ -272,6 +272,12 @@ class AqlSemanticsAssumptionsTest {
         assertThat(eval(guard.formatted("9007199254740993"))).as("2^53+1").isEqualTo(true);
         assertThat(eval(guard.formatted("-9007199254740993"))).as("-(2^53+1)").isEqualTo(true);
         assertThat(eval(guard.formatted("9223372036854775807"))).as("int64 max").isEqualTo(true);
+        // int64 min is the exact lower bound the guard hardcodes, and the only literal in it that
+        // AQL must parse as the negation of a value too large for int64 (2^63 is exactly
+        // representable as a double, so the negation is exact). ValueMaterializer accepts it --
+        // BigInteger(-2^63).bitLength() is 63 -- so the guard must too.
+        assertThat(eval(guard.formatted("-9223372036854775808"))).as("int64 min").isEqualTo(true);
+        assertThat(eval(guard.formatted("-9223372036854775807"))).as("int64 min+1").isEqualTo(true);
         assertThat(eval(guard.formatted("1e19"))).as("above 2^63").isEqualTo(false);
         assertThat(eval(guard.formatted("-1e19"))).as("below -2^63").isEqualTo(false);
         assertThat(eval(guard.formatted("\"x\""))).as("string").isEqualTo(false);
