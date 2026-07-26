@@ -1,6 +1,9 @@
 package io.arango.trino.aql;
 
 import io.airlift.slice.Slice;
+import io.arango.trino.aggregation.AggregateSpec;
+import io.arango.trino.aggregation.ArangoAggregation;
+import io.arango.trino.aggregation.ColumnGuard;
 import io.arango.trino.handle.ArangoColumnHandle;
 import io.arango.trino.handle.ArangoTableHandle;
 import io.trino.spi.connector.ColumnHandle;
@@ -8,6 +11,7 @@ import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.ValueSet;
 import io.trino.spi.type.DoubleType;
+import io.trino.spi.type.Type;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -18,9 +22,21 @@ public class AqlBuilder {
 
     public AqlQuery buildScan(ArangoTableHandle table, List<ArangoColumnHandle> columns) {
         Map<String, Object> bindVars = new LinkedHashMap<>();
-        bindVars.put("@col", table.table());
         int[] counter = {0};
+        StringBuilder aql = scanPrefix(table, bindVars, counter);
 
+        table.limit().ifPresent(limit -> aql.append(" LIMIT ").append(limit));
+
+        aql.append(" RETURN ").append(buildReturnClause(columns));
+        return new AqlQuery(aql.toString(), bindVars);
+    }
+
+    // Shared by buildScan and buildAggregate: "FOR d IN @@col" plus the pushed FILTER, if any.
+    // Both paths filter identically -- the aggregated path only differs after this point, where
+    // it emits COLLECT/AGGREGATE instead of projecting documents.
+    private StringBuilder scanPrefix(
+            ArangoTableHandle table, Map<String, Object> bindVars, int[] counter) {
+        bindVars.put("@col", table.table());
         StringBuilder aql = new StringBuilder("FOR d IN @@col");
 
         List<String> filters = new ArrayList<>();
@@ -40,11 +56,148 @@ public class AqlBuilder {
         if (!filters.isEmpty()) {
             aql.append(" FILTER ").append(String.join(" AND ", filters));
         }
+        return aql;
+    }
 
+    /**
+     * Renders a pushed aggregation as {@code FOR -> FILTER -> COLLECT/AGGREGATE -> LIMIT ->
+     * RETURN}. Every aggregate input and grouping key goes through {@link ColumnGuard}, so the
+     * query computes over exactly the values {@code ValueMaterializer} would have emitted.
+     *
+     * <p>The AGGREGATE terms come from the handle's descriptor, not from {@code columns}: the sum
+     * companion counts are never requested columns, and Trino may prune aggregate outputs. The
+     * RETURN object is built from {@code columns} instead, in their order, because {@code
+     * ArangoPageSource} looks each value up by the column's name.
+     */
+    public AqlQuery buildAggregate(ArangoTableHandle table, List<ArangoColumnHandle> columns) {
+        ArangoAggregation aggregation =
+                table.aggregation()
+                        .orElseThrow(
+                                () ->
+                                        new IllegalArgumentException(
+                                                "buildAggregate called on a non-aggregated handle"));
+        Map<String, Object> bindVars = new LinkedHashMap<>();
+        int[] counter = {0};
+        StringBuilder aql = scanPrefix(table, bindVars, counter);
+
+        // Synthetic variable names (g0..., a0...) so a column name that is not a legal AQL
+        // identifier -- e.g. applyProjection's nested "address$city" -- never has to be one.
+        // The real names appear only as quoted object keys in RETURN.
+        Map<String, String> returnExpressions = new LinkedHashMap<>();
+        List<String> groupTerms = new ArrayList<>();
+        List<ArangoColumnHandle> groupingColumns = aggregation.groupingColumns();
+        for (int i = 0; i < groupingColumns.size(); i++) {
+            ArangoColumnHandle column = groupingColumns.get(i);
+            String variable = "g" + i;
+            groupTerms.add(
+                    variable
+                            + " = "
+                            + coerceOrThrow(
+                                    column.type(),
+                                    documentAccessor(column.path()),
+                                    ColumnGuard.Purpose.GROUPING_KEY));
+            returnExpressions.put(column.name(), variable);
+        }
+
+        List<String> aggregateTerms = new ArrayList<>();
+        List<AggregateSpec> specs = aggregation.aggregates();
+        for (int i = 0; i < specs.size(); i++) {
+            AggregateSpec spec = specs.get(i);
+            String variable = "a" + i;
+            String accessor =
+                    spec.input().map(column -> documentAccessor(column.path())).orElse(null);
+            Type inputType = spec.input().map(ArangoColumnHandle::type).orElse(null);
+            switch (spec.kind()) {
+                case COUNT_STAR -> {
+                    aggregateTerms.add(variable + " = LENGTH(1)");
+                    returnExpressions.put(spec.outputName(), variable);
+                }
+                case COUNT_COLUMN -> {
+                    aggregateTerms.add(variable + " = SUM(" + countTerm(inputType, accessor) + ")");
+                    // AQL SUM over zero rows is null; Trino's count of an empty table is 0.
+                    returnExpressions.put(
+                            spec.outputName(), "(" + variable + " == null ? 0 : " + variable + ")");
+                }
+                case SUM -> {
+                    String companion = variable + "n";
+                    aggregateTerms.add(
+                            variable
+                                    + " = SUM("
+                                    + coerceOrThrow(
+                                            inputType, accessor, ColumnGuard.Purpose.SUM_AVG)
+                                    + ")");
+                    aggregateTerms.add(companion + " = SUM(" + countTerm(inputType, accessor) + ")");
+                    // AQL SUM of an all-null group is 0 where SQL says NULL; the companion count
+                    // distinguishes them. `null > 0` is false, so an empty table -- where the
+                    // companion itself is null -- also yields NULL, as SQL requires.
+                    returnExpressions.put(
+                            spec.outputName(),
+                            "(" + companion + " > 0 ? " + variable + " : null)");
+                }
+                case AVG -> {
+                    aggregateTerms.add(
+                            variable
+                                    + " = AVERAGE("
+                                    + coerceOrThrow(
+                                            inputType, accessor, ColumnGuard.Purpose.SUM_AVG)
+                                    + ")");
+                    returnExpressions.put(spec.outputName(), variable);
+                }
+                case MIN, MAX -> {
+                    String function = spec.kind() == AggregateSpec.Kind.MIN ? "MIN" : "MAX";
+                    aggregateTerms.add(
+                            variable
+                                    + " = "
+                                    + function
+                                    + "("
+                                    + coerceOrThrow(
+                                            inputType, accessor, ColumnGuard.Purpose.MIN_MAX)
+                                    + ")");
+                    returnExpressions.put(spec.outputName(), variable);
+                }
+            }
+        }
+
+        aql.append(" COLLECT");
+        if (!groupTerms.isEmpty()) {
+            aql.append(' ').append(String.join(", ", groupTerms));
+        }
+        if (!aggregateTerms.isEmpty()) {
+            aql.append(" AGGREGATE ").append(String.join(", ", aggregateTerms));
+        }
         table.limit().ifPresent(limit -> aql.append(" LIMIT ").append(limit));
 
-        aql.append(" RETURN ").append(buildReturnClause(columns));
+        StringBuilder returnClause = new StringBuilder("{");
+        for (int i = 0; i < columns.size(); i++) {
+            if (i > 0) {
+                returnClause.append(", ");
+            }
+            ArangoColumnHandle column = columns.get(i);
+            String expression = returnExpressions.get(column.name());
+            if (expression == null) {
+                throw new IllegalArgumentException(
+                        "column not produced by the pushed aggregation: " + column.name());
+            }
+            returnClause.append(quoteAqlString(column.name())).append(": ").append(expression);
+        }
+        aql.append(" RETURN ").append(returnClause.append("}"));
         return new AqlQuery(aql.toString(), bindVars);
+    }
+
+    // The 0/1 term a count sums: AQL COUNT is an alias of LENGTH and would count nulls too.
+    private static String countTerm(Type type, String accessor) {
+        return "("
+                + ColumnGuard.predicate(type, accessor)
+                        .orElseThrow(() -> new IllegalArgumentException("unguardable count input"))
+                + ") ? 1 : 0";
+    }
+
+    private static String coerceOrThrow(Type type, String accessor, ColumnGuard.Purpose purpose) {
+        return ColumnGuard.coerce(type, accessor, purpose)
+                .orElseThrow(
+                        () ->
+                                new IllegalArgumentException(
+                                        "unguardable aggregate input or grouping key: " + type));
     }
 
     // Only reachable for domain shapes ArangoMetadata.applyFilter already classified as
