@@ -14,7 +14,7 @@ Master spec §6.4/§6.5 fixes the *execution model* (single split, because Trino
 - `ColumnGuard` — the AQL rendering of `ValueMaterializer`'s coercion, shared by aggregate inputs and grouping keys.
 - `AqlBuilder.buildAggregate` — `FOR → FILTER → COLLECT/AGGREGATE → LIMIT → RETURN`.
 - `ArangoTableHandle` aggregation descriptor; `ArangoSplitManager` single-split rule for aggregated handles.
-- Guards on the existing hooks: `applyFilter` declines on an aggregated handle; `applyAggregation` declines when a limit is already pushed; `applyLimit` reports `limitGuaranteed = true` for an aggregated handle.
+- Guards on the existing hooks: `applyFilter` and `applyProjection` decline on an aggregated handle; `applyAggregation` declines when a limit is already pushed; `applyLimit` reports `limitGuaranteed = true` for an aggregated handle.
 - New config `arangodb.aggregation-pushdown-enabled` (default `true`).
 - Permanent pinning of the AQL semantics in §4 into `AqlSemanticsAssumptionsTest`.
 
@@ -98,6 +98,8 @@ Probe 8's full guard, applied to a deliberately dirty column, keeps exactly `{42
 
 `avg(BIGINT)` returns `DOUBLE` in Trino but is declined for the §4/15 reason: AQL would compute the mean of double-rounded inputs.
 
+**Zero-aggregate grouping is claimed.** `SELECT DISTINCT city FROM t` and a bare `GROUP BY city` arrive as `aggregates = []` with `groupingSets = [[city]]`. AQL allows `COLLECT` with no `AGGREGATE` terms (§4/17) and returns exactly the distinct groups, so these push whenever the grouping columns pass the matrix above. The degenerate `aggregates = []` **with** `groupingSets = [[]]` declines (§6/9) — it is a global aggregation with nothing to aggregate, which Trino knows produces exactly one row anyway.
+
 ---
 
 ## 6. Decline rules
@@ -112,8 +114,12 @@ Probe 8's full guard, applied to a deliberately dirty column, keeps exactly `{42
 6. Any `AggregateFunction` with `isDistinct()`, a present `getFilter()`, or non-empty `getSortItems()`.
 7. Any aggregate whose argument list is neither empty (`count(*)`) nor a single `Variable` resolving through `assignments` to an `ArangoColumnHandle`.
 8. Any aggregate or grouping column failing the §5 matrix.
+9. `aggregates.isEmpty() && groupingSets.equals([[]])` — a global aggregation with no aggregate functions. Nothing to compute; base-JDBC treats the same shape as unreachable.
 
-**Reciprocal guard — `applyFilter` must decline when `handle.aggregation().isPresent()`.** A filter arriving after aggregation is a `HAVING`; `AqlBuilder` renders pushed filters *before* `COLLECT`, so pushing it would silently convert `HAVING` into `WHERE`. This is a new decline on an existing hook and is easy to miss.
+**Reciprocal guards on the existing hooks.** Both are new declines on hooks that already exist, and both are easy to miss:
+
+- **`applyFilter` must decline when `handle.aggregation().isPresent()`.** A filter arriving after aggregation is a `HAVING`; `AqlBuilder` renders pushed filters *before* `COLLECT`, so pushing it would silently convert `HAVING` into `WHERE`.
+- **`applyProjection` must decline when `handle.aggregation().isPresent()`.** It currently declines such calls only incidentally — its `!progress` exit happens to fire because aggregate outputs and grouping keys are all scalars, so no `FieldDereference` can resolve against them. That is safety by coincidence; make it explicit so a later widening of the §5 matrix to structured grouping keys cannot silently turn it into a dereference pushed against a `COLLECT` variable.
 
 **`applyLimit` on an aggregated handle is safe and exact.** A `LIMIT` after `COLLECT` on a single split is the final limit, so `limitGuaranteed` is `true` for aggregated handles (`!config.isShardParallelismEnabled() || handle.aggregation().isPresent()`).
 
@@ -142,6 +148,8 @@ Per-aggregate rendering, with `Aⁿ` the guard applied to that aggregate's input
 | `max(col)` | `aN = MAX(coerce)` | `aN` |
 | `avg(col)` | `aN = AVERAGE(coerce)` | `aN` |
 | `sum(col)` | `aN = SUM(coerce)`, `aNn = SUM(predicate ? 1 : 0)` | `(aNn > 0 ? aN : null)` — §4/2 |
+
+The `AGGREGATE` terms come from the handle's `ArangoAggregation` descriptor, **not** from the requested column list: the `sum` companion counts are never requested columns, and Trino may prune aggregate outputs it does not need. The `RETURN` object is built from the requested columns instead, in their order, with each looked up against the descriptor. `buildAggregate` therefore does not reuse `buildScan`'s "project the requested columns" shape, and must not assume the two lists agree in length or order.
 
 Grouping keys render as `COLLECT gN = coerce`. Synthetic AQL variable names (`g0…`, `a0…`) are used deliberately so a column name that isn't a legal AQL identifier — e.g. `applyProjection`'s nested `address$city` — never has to be one; the *object keys* in `RETURN` carry the real names, quoted, and are what `ArangoPageSource` looks up.
 
@@ -180,6 +188,12 @@ Aggregate output columns are named `agg_<ordinal>`; if that name collides with a
 
 **`ArangoPageSource` and `ValueMaterializer` are unchanged.** The page source already does `row.get(col.name())` and materializes by `col.type()`; an aggregate output is just an `ArangoColumnHandle` carrying `AggregateFunction.getOutputType()`, so the existing machinery reads it. `ArangoPageSourceProvider` is unchanged apart from dispatching to `buildAggregate`.
 
+### 8.1 Spotless ratchet — a sequencing constraint, not a design choice
+
+Six pre-existing files are modified (`ArangoTableHandle`, `ArangoMetadata`, `AqlBuilder`, `ArangoSplitManager`, `ArangoConfig`, plus their tests). Spotless is ratcheted `ratchetFrom=origin/master` and is **file-granular**: touching any line of a file puts the whole file under google-java-format AOSP, which is precisely why the hand-tuned M1–M3 source was left alone until now (`AqlBuilder` especially — its long explanatory comment lines and compact blocks will reflow). Adding a component to `ArangoTableHandle` additionally breaks every construction site, including `ArangoMetadataTest` (805 lines), `ArangoMetadataLimitTest`, `AqlBuilderTest`, and `ArangoConnectorPushdownTest`.
+
+**Therefore the implementation plan opens with a formatting-only commit**: `mvn spotless:apply` over exactly the files M5 will touch, committed alone with no logic change, so that the reviewable M5 diff is logic rather than two thousand lines of reindentation with edits buried in it. Doing this after the fact means rewriting the branch's history.
+
 SPI result: `new AggregationApplicationResult<>(newHandle, projections, assignments, ImmutableMap.of(), false)` — the empty `groupingColumnMapping` because grouping columns keep their original handles (as base-JDBC does), and `precalculateStatistics = false` since M5 ships no statistics.
 
 ---
@@ -195,7 +209,8 @@ An aggregated handle emits exactly one split (master spec §6.4: Trino treats co
 1. **Double overflow reads as `0`.** `SUM`/`AVERAGE` over `DOUBLE` values whose total exceeds `DBL_MAX` returns `0` in AQL where Trino's `sum(double)` returns `Infinity` (§4/14). Root cause is the one already accepted in M2: JSON/VelocyPack cannot carry non-finite doubles. Requires summands within a few orders of magnitude of `1.8e308`. Documented, not closed.
 2. **Floating-point associativity.** `sum`/`avg` over `DOUBLE` may differ in the last bits between the pushed and non-pushed plan, because summation order differs. Trino's own multi-split `sum(double)` is already non-deterministic this way; pushdown makes the result *deterministic but potentially different*, which is the same class of difference, not a new one.
 3. **`min`/`max` on `VARCHAR`, `sum`/`avg` on `BIGINT` are never pushed** — Trino computes them, correctly, at full scan cost.
-4. **No `HAVING` pushdown.** Post-aggregation filters are evaluated by Trino (§6, reciprocal guard).
+4. **No `HAVING` pushdown.** Post-aggregation filters are evaluated by Trino (§6, reciprocal guards).
+5. **A residual filter can block aggregation pushdown entirely.** Trino's `PushAggregationIntoTableScan` matches `aggregation(tableScan())` and `aggregation(project(tableScan()))`; a residual predicate leaves a `FilterNode` in between. Because `BIGINT` range is deliberately *prefilter-only* — pushed to AQL **and** kept residual for Trino's re-check — `... WHERE bigint_col > 100 GROUP BY city` can fail to push its aggregate while the otherwise-identical `... WHERE double_col > 100 ...` (fully enforced, no residual) pushes. The asymmetry is inherited from M2's C2/C3 resolution, not introduced here, and it is a missed optimization rather than a wrong answer. §11 pins the actual behavior with a test so the documented asymmetry matches the planner rather than an assumption about it.
 
 ---
 
@@ -211,7 +226,9 @@ An aggregated handle emits exactly one split (master spec §6.4: Trino treats co
 - empty-table global aggregation returns one row with `count = 0` and `sum = NULL` (§4/3, §4/6);
 - a group whose values are all type-mismatched returns `sum = NULL`, `count = 0` (§4/2);
 - `GROUP BY` on a `DOUBLE` column containing `-0.0`, `0.0`, and `0` yields a single group (§4/10);
-- `GROUP BY` where the column has stored-null and absent values yields one shared `NULL` group (§4/11).
+- `GROUP BY` where the column has stored-null and absent values yields one shared `NULL` group (§4/11);
+- `SELECT DISTINCT col` and bare `GROUP BY col` (zero aggregates) push and return the right groups;
+- **the residual-filter interaction (§10/5)**: an aggregate over a `DOUBLE`-range predicate and the same aggregate over a `BIGINT`-range predicate, asserting each one's actual pushdown status, so §10/5's text is pinned to observed planner behavior. This test is written early — before the rest of the IT suite — because if the `BIGINT` case does not push, every later `isFullyPushedDown()` assertion combining a filter with an aggregate has to be written accordingly.
 
 ---
 
@@ -224,6 +241,9 @@ An aggregated handle emits exactly one split (master spec §6.4: Trino treats co
 5. **Strict coercion declines all aggregation pushdown**, mirroring `isPushable`.
 6. **`applyFilter` gains a decline on aggregated handles** — a behavior change to an existing hook, motivated by `HAVING`.
 7. **Double-overflow-to-`0` is accepted** (§10/1) rather than closed by declining `sum`/`avg`; decided in-session 2026-07-26.
+8. **`applyProjection` gains an explicit decline on aggregated handles** — today it declines only by coincidence (§6).
+9. **The branch opens with a formatting-only commit** (§8.1). This is the first milestone to modify ratcheted M1–M3 files, so the ratchet's cost is paid once, visibly, and separately from the logic diff.
+10. **Zero-aggregate grouping (`DISTINCT`, bare `GROUP BY`) is claimed** (§5), on the strength of §4/17.
 
 ---
 
