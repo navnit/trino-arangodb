@@ -15,6 +15,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
 import org.junit.jupiter.api.AfterAll;
@@ -57,7 +58,7 @@ class ShardParallelCorrectnessIT {
 
     private static ArangoTableHandle handle() {
         // 5-arg record: (schema, table, edge, constraint, limit).
-        return new ArangoTableHandle(DB, COLL, false, TupleDomain.all(), OptionalLong.empty());
+        return new ArangoTableHandle(DB, COLL, false, TupleDomain.all(), OptionalLong.empty(), Optional.empty());
     }
 
     private static List<ArangoSplit> splits(ArangoConfig config) {

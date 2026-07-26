@@ -16,6 +16,7 @@ import java.util.Set;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import java.util.Optional;
 
 class ArangoSplitManagerTest {
     private static TestingArangoServer server;
@@ -52,7 +53,7 @@ class ArangoSplitManagerTest {
                 COLL,
                 false,
                 io.trino.spi.predicate.TupleDomain.all(),
-                java.util.OptionalLong.empty());
+                java.util.OptionalLong.empty(), Optional.empty());
     }
 
     private static List<ArangoSplit> collect(ArangoSplitManager mgr) {

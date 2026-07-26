@@ -21,7 +21,7 @@ import org.junit.jupiter.api.Test;
 class ArangoMetadataLimitTest {
     private static ArangoTableHandle tableHandle() {
         return new ArangoTableHandle(
-                "shop", "users", false, TupleDomain.all(), OptionalLong.empty());
+                "shop", "users", false, TupleDomain.all(), OptionalLong.empty(), Optional.empty());
     }
 
     @Test

@@ -106,7 +106,7 @@ public class ArangoMetadata implements ConnectorMetadata {
                                             c.name(),
                                             c.isEdge(),
                                             TupleDomain.all(),
-                                            OptionalLong.empty()))
+                                            OptionalLong.empty(), Optional.empty()))
                     .orElse(null); // null => table not found (Trino throws)
         } catch (ArangoDBException e) {
             if (isDatabaseNotFound(e)) {
