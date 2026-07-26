@@ -923,4 +923,39 @@ class ArangoMetadataTest {
                 .isInstanceOf(TrinoException.class)
                 .hasFieldOrPropertyWithValue("errorCode", GENERIC_INTERNAL_ERROR.toErrorCode());
     }
+
+    // applyFilter guards `isNone()` on the INCOMING constraint, but the intersection with what is
+    // already on the handle can also be unsatisfiable -- e.g. a second push of `age = 40` onto a
+    // handle already carrying `age = 30`. Pushing that would be silently catastrophic:
+    // TupleDomain.getDomains() returns Optional.empty() for BOTH all() and none(), so AqlBuilder
+    // cannot tell "no constraint" from "unsatisfiable" and emits NO FILTER -- a full-collection
+    // scan where the answer is zero rows, and (since M5) a full-collection count(*) where the
+    // answer is 0. The residual is ALL, so Trino does not re-check either.
+    //
+    // Trino 483 folds contradictory predicates into a ValuesNode before the connector sees them,
+    // so this is latent rather than live today; it is guarded here because reachability depends on
+    // optimizer behavior, and dynamic filtering (M7) delivers domains incrementally, which is
+    // exactly the shape that would reach it.
+    @Test
+    void applyFilterDeclinesWhenTheIntersectedConstraintIsUnsatisfiable() {
+        ArangoMetadata metadata = new ArangoMetadata(null, null, new ArangoConfig());
+        ArangoColumnHandle age = new ArangoColumnHandle("age", BIGINT, false, List.of("age"));
+        ArangoTableHandle handle =
+                new ArangoTableHandle(
+                        "shop",
+                        "users",
+                        false,
+                        TupleDomain.withColumnDomains(
+                                Map.<ColumnHandle, Domain>of(age, Domain.singleValue(BIGINT, 30L))),
+                        OptionalLong.empty(),
+                        Optional.empty());
+
+        Constraint contradictory =
+                new Constraint(
+                        TupleDomain.withColumnDomains(
+                                Map.<ColumnHandle, Domain>of(
+                                        age, Domain.singleValue(BIGINT, 40L))));
+
+        assertThat(metadata.applyFilter(null, handle, contradictory)).isEmpty();
+    }
 }

@@ -242,6 +242,16 @@ public class ArangoMetadata implements ConnectorMetadata {
         if (newHandleConstraint.equals(handle.constraint())) {
             return Optional.empty(); // nothing new to push; avoid re-invoking applyFilter forever
         }
+        // The incoming summary was checked for isNone() above, but the INTERSECTION with what the
+        // handle already carries can still be unsatisfiable (push `age = 30`, then `age = 40`).
+        // Such a constraint must never reach the handle: TupleDomain.getDomains() returns
+        // Optional.empty() for both all() and none(), so AqlBuilder cannot distinguish "no
+        // constraint" from "unsatisfiable" and would emit NO FILTER -- a full-collection scan
+        // where the correct answer is zero rows, with an empty residual so Trino does not
+        // re-check. Declining leaves the whole predicate to Trino, which is always correct.
+        if (newHandleConstraint.isNone()) {
+            return Optional.empty();
+        }
 
         ArangoTableHandle newHandle = handle.withConstraint(newHandleConstraint);
         return Optional.of(
@@ -331,12 +341,12 @@ public class ArangoMetadata implements ConnectorMetadata {
             // The output type is the aggregate's, never the inferred column's: count over a
             // VARCHAR column outputs BIGINT. ArangoPageSource then materializes it like any
             // other column, which is why the read path needs no change for M5.
+            // Empty path, not List.of(outputName): an aggregate output is produced by a COLLECT
+            // variable, not by any document attribute. Giving it a path would make the handle
+            // constructible into a nonsense state -- anything routing it through buildScan would
+            // render d["agg_0"] and silently read nulls.
             ArangoColumnHandle output =
-                    new ArangoColumnHandle(
-                            spec.outputName(),
-                            spec.outputType(),
-                            false,
-                            List.of(spec.outputName()));
+                    new ArangoColumnHandle(spec.outputName(), spec.outputType(), false, List.of());
             projections.add(new Variable(output.name(), output.type()));
             newAssignments.add(new Assignment(output.name(), output, output.type()));
         }
