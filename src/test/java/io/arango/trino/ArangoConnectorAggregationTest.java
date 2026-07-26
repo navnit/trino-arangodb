@@ -39,9 +39,12 @@ class ArangoConnectorAggregationTest extends AbstractTestQueryFramework {
             // Clean fixture: every value matches its inferred type, so pushed and unpushed results
             // must agree exactly.
             seed.createDocumentCollectionForTest("agg", "sales");
-            seed.insertForTest("agg", "sales", Map.of("city", "nyc", "qty", 3L, "price", 10.5));
-            seed.insertForTest("agg", "sales", Map.of("city", "nyc", "qty", 5L, "price", 2.5));
-            seed.insertForTest("agg", "sales", Map.of("city", "sfo", "qty", 7L, "price", 4.0));
+            seed.insertForTest(
+                    "agg", "sales", Map.of("city", "nyc", "qty", 3L, "price", 10.5, "vip", true));
+            seed.insertForTest(
+                    "agg", "sales", Map.of("city", "nyc", "qty", 5L, "price", 2.5, "vip", false));
+            seed.insertForTest(
+                    "agg", "sales", Map.of("city", "sfo", "qty", 7L, "price", 4.0, "vip", true));
 
             // Dirty fixture: the first two documents type the columns (sample-size 2), so the
             // later mismatched / absent / out-of-range values are invisible to inference and
@@ -240,6 +243,94 @@ class ArangoConnectorAggregationTest extends AbstractTestQueryFramework {
         assertThat(query("SELECT count(1) FROM arango.agg.sales"))
                 .matches("VALUES BIGINT '3'")
                 .isFullyPushedDown();
+    }
+
+    // The g0/g1/... rendering loop in buildAggregate had never executed with more than one
+    // grouping column anywhere in the suite -- unit tests included.
+    @Test
+    void multiColumnGroupByMatchesTheReference() {
+        assertSameAsReference("SELECT city, qty, count(*) FROM %s.sales GROUP BY city, qty");
+        assertSameAsReference(
+                "SELECT city, vip, count(*), sum(price) FROM %s.sales GROUP BY city, vip");
+        assertThat(query("SELECT city, qty, count(*) FROM arango.agg.sales GROUP BY city, qty"))
+                .isFullyPushedDown();
+    }
+
+    // HAVING is the reason applyFilter declines on an aggregated handle: pushed filters render
+    // BEFORE the COLLECT, so a pushed HAVING would silently become a WHERE.
+    @Test
+    void havingIsEvaluatedByTrinoAndStaysCorrect() {
+        assertSameAsReference(
+                "SELECT city, count(*) FROM %s.sales GROUP BY city HAVING count(*) > 1");
+        assertSameAsReference(
+                "SELECT city, sum(price) FROM %s.sales GROUP BY city HAVING sum(price) > 5.0");
+    }
+
+    // limitGuaranteed is reported true for an aggregated handle (always a single split), so Trino
+    // relies on the connector to apply the limit exactly.
+    @Test
+    void groupByWithLimitReturnsExactlyTheLimit() {
+        assertThat(
+                        computeActual(
+                                        "SELECT city, count(*) FROM arango.agg.sales GROUP BY city"
+                                                + " LIMIT 1")
+                                .getMaterializedRows())
+                .hasSize(1);
+        assertThat(
+                        computeActual("SELECT DISTINCT city FROM arango.agg.sales LIMIT 1")
+                                .getMaterializedRows())
+                .hasSize(1);
+    }
+
+    // min/max on DOUBLE is claimed but was never asserted end-to-end -- and it is exactly what the
+    // S1 fix changed by dropping the `+ 0.0` promotion.
+    @Test
+    void minMaxOnDoubleAndBooleanColumnsMatchTheReference() {
+        assertSameAsReference("SELECT min(price), max(price) FROM %s.sales");
+        assertSameAsReference("SELECT count(vip) FROM %s.sales");
+        assertSameAsReference("SELECT vip, count(*) FROM %s.sales GROUP BY vip");
+        assertThat(query("SELECT min(price), max(price) FROM arango.agg.sales"))
+                .isFullyPushedDown();
+        assertThat(query("SELECT vip, count(*) FROM arango.agg.sales GROUP BY vip"))
+                .isFullyPushedDown();
+    }
+
+    // Grouping on a DOUBLE column exercises the `+ 0.0` promotion that collapses -0.0 into 0.0.
+    @Test
+    void groupByOnADoubleColumnMatchesTheReference() {
+        assertSameAsReference("SELECT price, count(*) FROM %s.sales GROUP BY price");
+    }
+
+    // isFullyPushedDown proves only that Trino REMOVED its AggregationNode -- that the connector
+    // claimed the work. These assertions prove the reduction physically happened in ArangoDB: the
+    // connector hands Trino one row per group instead of one row per document. A refactor that
+    // returned documents and aggregated locally would keep every result correct and every plan
+    // assertion green, and would fail here.
+    @Test
+    void pushedAggregatesReduceRowsBeforeTheyCrossTheWire() {
+        assertQueryStats(
+                getSession(),
+                "SELECT count(*) FROM arango.agg.sales",
+                stats -> assertThat(stats.getPhysicalInputPositions()).isEqualTo(1),
+                results -> {});
+        assertQueryStats(
+                getSession(),
+                "SELECT city, count(*) FROM arango.agg.sales GROUP BY city",
+                stats -> assertThat(stats.getPhysicalInputPositions()).isEqualTo(2),
+                results -> {});
+        // The same queries without pushdown read every document -- the control that makes the
+        // assertions above meaningful rather than incidental.
+        assertQueryStats(
+                getSession(),
+                "SELECT count(*) FROM noagg.agg.sales",
+                stats -> assertThat(stats.getPhysicalInputPositions()).isEqualTo(3),
+                results -> {});
+        // A declined aggregate must also read everything.
+        assertQueryStats(
+                getSession(),
+                "SELECT min(city) FROM arango.agg.sales",
+                stats -> assertThat(stats.getPhysicalInputPositions()).isEqualTo(3),
+                results -> {});
     }
 
     @Test
