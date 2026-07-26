@@ -201,6 +201,12 @@ class ArangoConnectorAggregationTest extends AbstractTestQueryFramework {
     }
 
     // Review finding B1's end-to-end regression: 0, -0.0 and 0.0 must be ONE group, not two.
+    //
+    // This assertion is only non-vacuous because AqlSemanticsAssumptionsTest
+    // .bigintGroupingNeedsSignedZeroNormalizationAndAgreesUnderBothCollectMethods proves -- through
+    // this same insertForTest path -- that a BARE accessor yields 2 groups under hash-COLLECT. If
+    // VelocyPack ever normalized -0.0 to 0 at insert, that test would fail first and tell us this
+    // one had stopped testing anything (the trap that made the original §4/12 probe vacuous).
     @Test
     void signedZeroDoesNotSplitAGroup() {
         MaterializedResult grouped =
@@ -223,6 +229,17 @@ class ArangoConnectorAggregationTest extends AbstractTestQueryFramework {
                 .isNotFullyPushedDown(AggregationNode.class);
         assertThat(query("SELECT sum(qty) FROM arango.agg.sales"))
                 .isNotFullyPushedDown(AggregationNode.class);
+    }
+
+    // Review finding M3: AggregatePushdown declines any aggregate whose argument is not a plain
+    // column reference, so count(1) pushes only if Trino canonicalizes the constant argument away
+    // before the connector sees it. Pinned because it is a common query shape and the answer
+    // decides whether widening the rule to accept a non-null Constant is worth doing.
+    @Test
+    void countOfAConstantIsPinned() {
+        assertThat(query("SELECT count(1) FROM arango.agg.sales"))
+                .matches("VALUES BIGINT '3'")
+                .isFullyPushedDown();
     }
 
     @Test
