@@ -76,6 +76,12 @@ Measured against **ArangoDB 3.12.4-3** (the version `TestingArangoServer` runs) 
 | 15 | `SUM([2⁵³+1, 1])` = `9007199254740992.0`; `SUM([int64_max, int64_max])` silently = `1.8446744073709552e19` | AQL sums in double space ⇒ `sum(BIGINT)` is not claimable (§5) |
 | 16 | Guarded `MIN`/`MAX` over a `BIGINT` column return exact int64 (`9223372036854775807`, unrounded) | `min`/`max` on `BIGINT` **are** claimable |
 | 17 | `COLLECT` with zero `AGGREGATE` terms is legal | pure `GROUP BY` / `DISTINCT` shapes render fine |
+| 18 | **`COLLECT`'s two execution methods disagree.** Grouping `{int 0, double -0.0, double 0.0}` on a bare accessor gives **one** group under `method: "sorted"` and **two** under `method: "hash"`. The optimizer picks `hash` for M5's shape (`collectOptions: {method: "hash", fixed: true}`) | a bare `BIGINT` grouping key is a **live** wrong-row-count bug, not a theoretical one (§5, review finding B1); every grouping probe must be pinned under *both* methods |
+| 19 | Normalizing the key as `(a == 0 ? 0 : a)` yields one group under **both** methods | the fix is method-independent, so no `OPTIONS { method: ... }` hint is needed |
+| 20 | int64 `2⁵³+1` and double `2⁵³` stay **separate** groups under both methods | `BIGINT` grouping is exact at the boundary, as the read path requires |
+| 21 | AQL `==` is **byte-exact**, not collation-based: `"ab" == "a­b"`, NFC `"é"` == NFD `"é"`, `"a" == "A"` are all `false`, and `COLLECT` keeps all seven test strings distinct under both methods | `VARCHAR` grouping keys are exact (review finding B2 refuted); independently confirms that **M2's already-shipped `VARCHAR` equality pushdown is sound** |
+| 22 | Rounding is monotone in practice: `MAX([2⁵³+1, 2⁵³+3])` bare, then promoted on read, equals the promoted `MAX` | the `+ 0.0` promotion is **not** needed for `min`/`max(DOUBLE)` (§7) |
+| 23 | `null > 0` is `false` | the `sum` empty-table fix-up `(aNn > 0 ? aN : null)` is load-bearing on this; pinned directly rather than derived from the ordering rule |
 
 Probe 8's full guard, applied to a deliberately dirty column, keeps exactly `{42, 2⁵³+1, -(2⁵³+1), int64_max, int64_min, 0, 2⁵³-as-double}` and drops exactly `{42.5, -0.5, 1e19, -1e19, uint64_max, "x", true, null, missing}` — which is, value for value, `ValueMaterializer.isIntegralInLongRange`.
 
@@ -88,12 +94,12 @@ Probe 8's full guard, applied to a deliberately dirty column, keeps exactly `{42
 | `count()` (zero args) | — | **yes** | no input ⇒ no coercion surface |
 | `count(col)` | `BOOLEAN`, `VARCHAR`, `BIGINT`, `DOUBLE` | **yes** | guard is a predicate only; ordering and precision never enter |
 | `min` / `max` | `BIGINT`, `DOUBLE` | **yes** | guarded comparison is exact (§4/16); `+ 0.0` makes `DOUBLE` agree with `doubleValue()` |
-| `min` / `max` | `VARCHAR` | **no** | ArangoDB orders strings by server ICU collation, Trino by codepoint — §6.1's existing reason for declining string range |
+| `min` / `max` | `VARCHAR` | **no** | string *ordering* depends on the server's collation configuration (`--icu-language`), whereas Trino orders by codepoint — §6.1's existing reason for declining string range. Note this is about ordering only: string *equality* was measured byte-exact (§4/21), which is why `VARCHAR` grouping keys are fine |
 | `min` / `max` | `BOOLEAN` | **no** | legal in Trino and would be correct, but the value is negligible; kept out to hold the surface small |
 | `sum` / `avg` | `DOUBLE` | **yes** | both sides accumulate in double; see §10 on associativity |
 | `sum` / `avg` | `BIGINT` | **no** | AQL accumulates in double (§4/15): precision is lost past 2⁵³ and `sum(bigint)` overflow, which Trino raises on, is silent |
 | any | `ARRAY`, `ROW`, `DECIMAL` | **no** | no exact AQL guard exists; consistent with `isPushable` never admitting them |
-| **grouping key** | `BOOLEAN`, `VARCHAR`, `BIGINT`, `DOUBLE` | **yes** | grouping is equality-based, so collation never enters; `VARCHAR` is fine here even though `min`/`max` on it is not |
+| **grouping key** | `BOOLEAN`, `VARCHAR`, `BIGINT`, `DOUBLE` | **yes** | grouping is equality-based and AQL equality is byte-exact (§4/21), so collation never enters; `VARCHAR` is fine here even though `min`/`max` on it is not. `BIGINT` keys require the signed-zero normalization in §7 |
 | **grouping key** | `ARRAY`, `ROW`, `DECIMAL` | **no** | as above |
 
 `avg(BIGINT)` returns `DOUBLE` in Trino but is declined for the §4/15 reason: AQL would compute the mean of double-rounded inputs.
@@ -115,6 +121,9 @@ Probe 8's full guard, applied to a deliberately dirty column, keeps exactly `{42
 7. Any aggregate whose argument list is neither empty (`count(*)`) nor a single `Variable` resolving through `assignments` to an `ArangoColumnHandle`.
 8. Any aggregate or grouping column failing the §5 matrix.
 9. `aggregates.isEmpty() && groupingSets.equals([[]])` — a global aggregation with no aggregate functions. Nothing to compute; base-JDBC treats the same shape as unreachable.
+10. **Any domain on the handle's constraint that is `isPrefilterOnly`** (`BIGINT` + non-discrete, `ArangoMetadata:300`). Such a constraint is enforced *jointly* by the pushed AQL and Trino's residual re-check; an aggregate computed on top of the AQL side alone would include rows — fractional or out-of-long-range values in the *filter* column — that the residual would have dropped. §10/8 argues the planner never offers this shape, but that argument depends on `PushAggregationIntoTableScan`'s pattern and could be invalidated by a Trino upgrade. This decline makes the guarantee local instead of planner-dependent, and costs one line.
+
+Rule 8's matrix is keyed by function name, so `AggregatePushdown` carries an **explicit allowlist** of `count`/`sum`/`min`/`max`/`avg`; anything else (`approx_distinct`, `count_if`, `arbitrary`, `checksum`, …) declines by construction rather than by falling through a chain of `if`s.
 
 **Reciprocal guards on the existing hooks.** Both are new declines on hooks that already exist, and both are easy to miss:
 
@@ -129,14 +138,21 @@ Probe 8's full guard, applied to a deliberately dirty column, keeps exactly `{42
 
 `ColumnGuard` exposes two renderings per Trino type, both `Optional` (empty ⇒ decline):
 
-| Type | `predicate(accessor)` | `value(accessor)` |
-|---|---|---|
-| `BOOLEAN` | `IS_BOOL(a)` | `a` |
-| `VARCHAR` | `IS_STRING(a)` | `a` |
-| `DOUBLE` | `IS_NUMBER(a)` | `(a + 0.0)` |
-| `BIGINT` | `IS_NUMBER(a) AND a >= -9223372036854775808 AND a < 9223372036854775808 AND (ABS(a) >= 9007199254740992 OR a == FLOOR(a))` | `a` |
+| Type | `predicate(accessor)` | `value` for `sum`/`avg` and grouping keys | `value` for `min`/`max` |
+|---|---|---|---|
+| `BOOLEAN` | `IS_BOOL(a)` | `a` | n/a (declined) |
+| `VARCHAR` | `IS_STRING(a)` | `a` | n/a (declined) |
+| `DOUBLE` | `IS_NUMBER(a)` | `(a + 0.0)` | `a` |
+| `BIGINT` | `IS_NUMBER(a) AND a >= -9223372036854775808 AND a < 9223372036854775808 AND (ABS(a) >= 9007199254740992 OR a == FLOOR(a))` | `(a == 0 ? 0 : a)` | `a` |
 
-with `coerce(a) = ((predicate) ? value : null)`. The `BIGINT` predicate is `isIntegralInLongRange` transliterated; the `DOUBLE` `+ 0.0` is the existing C1 promotion, which does double duty here by collapsing `-0.0` into `0.0` for grouping (§4/10).
+with `coerce(a) = ((predicate) ? value : null)`. The `BIGINT` predicate is `isIntegralInLongRange` transliterated.
+
+**Why `value` differs by context** — both divergences were found by review and confirmed by measurement:
+
+- **`BIGINT` grouping keys must normalize signed zero.** A stored double `-0.0` passes the guard (it is fraction-free and in range) and the read path reads it as `0` via `longValue()`. But `COLLECT` under the `hash` method — which the optimizer *chooses* for M5's shape — puts `-0.0` in its own group (§4/18). Two AQL groups would then both materialize to key `0`, and since aggregation output is final, Trino would emit two rows for one group: a wrong row set. `(a == 0 ? 0 : a)` maps `-0.0` to integer `0` by exact numeric equality while leaving `2⁵³+1` untouched, and makes the result identical under both `COLLECT` methods (§4/19).
+- **`min`/`max(DOUBLE)` must *not* promote.** `+ 0.0` turns a stored `-0.0` into `0.0`, so `min` would return `0.0` pushed and `-0.0` unpushed. The promotion is also unnecessary: double rounding is monotone, so the bare `MIN`/`MAX`, rounded when the read path applies `doubleValue()`, already equals Trino's min/max over the read values (§4/22). `sum`/`avg` keep the promotion — there the C1 argument applies unchanged, since summation is over the values themselves.
+
+For `DOUBLE` grouping keys the promotion stays and is load-bearing in the opposite direction: it is what collapses `-0.0` and `0.0` into one group (§4/10), matching Trino's normalization.
 
 Per-aggregate rendering, with `Aⁿ` the guard applied to that aggregate's input column:
 
@@ -192,7 +208,9 @@ Aggregate output columns are named `agg_<ordinal>`; if that name collides with a
 
 Six pre-existing files are modified (`ArangoTableHandle`, `ArangoMetadata`, `AqlBuilder`, `ArangoSplitManager`, `ArangoConfig`, plus their tests). Spotless is ratcheted `ratchetFrom=origin/master` and is **file-granular**: touching any line of a file puts the whole file under google-java-format AOSP, which is precisely why the hand-tuned M1–M3 source was left alone until now (`AqlBuilder` especially — its long explanatory comment lines and compact blocks will reflow). Adding a component to `ArangoTableHandle` additionally breaks every construction site, including `ArangoMetadataTest` (805 lines), `ArangoMetadataLimitTest`, `AqlBuilderTest`, and `ArangoConnectorPushdownTest`.
 
-**Therefore the implementation plan opens with a formatting-only commit**: `mvn spotless:apply` over exactly the files M5 will touch, committed alone with no logic change, so that the reviewable M5 diff is logic rather than two thousand lines of reindentation with edits buried in it. Doing this after the fact means rewriting the branch's history.
+**Therefore the implementation plan opens with a formatting-only commit** so that the reviewable M5 diff is logic rather than two thousand lines of reindentation with edits buried in it. Doing this after the fact means rewriting the branch's history.
+
+The mechanism matters: a bare `mvn spotless:apply` at the branch point is a **no-op**, because the ratchet restricts Spotless to files that differ from `origin/master` and at that moment none do. The step is therefore: temporarily neutralize `ratchetFrom` in `pom.xml`, run `spotless:apply` restricted to exactly the M5 files, restore `pom.xml`, and commit the reformatting alone. (`-DspotlessFiles` by itself does not help — the ratchet filter still applies on top of it.)
 
 SPI result: `new AggregationApplicationResult<>(newHandle, projections, assignments, ImmutableMap.of(), false)` — the empty `groupingColumnMapping` because grouping columns keep their original handles (as base-JDBC does), and `precalculateStatistics = false` since M5 ships no statistics.
 
@@ -210,15 +228,21 @@ An aggregated handle emits exactly one split (master spec §6.4: Trino treats co
 2. **Floating-point associativity.** `sum`/`avg` over `DOUBLE` may differ in the last bits between the pushed and non-pushed plan, because summation order differs. Trino's own multi-split `sum(double)` is already non-deterministic this way; pushdown makes the result *deterministic but potentially different*, which is the same class of difference, not a new one.
 3. **`min`/`max` on `VARCHAR`, `sum`/`avg` on `BIGINT` are never pushed** — Trino computes them, correctly, at full scan cost.
 4. **No `HAVING` pushdown.** Post-aggregation filters are evaluated by Trino (§6, reciprocal guards).
-5. **A residual filter can block aggregation pushdown entirely.** Trino's `PushAggregationIntoTableScan` matches `aggregation(tableScan())` and `aggregation(project(tableScan()))`; a residual predicate leaves a `FilterNode` in between. Because `BIGINT` range is deliberately *prefilter-only* — pushed to AQL **and** kept residual for Trino's re-check — `... WHERE bigint_col > 100 GROUP BY city` can fail to push its aggregate while the otherwise-identical `... WHERE double_col > 100 ...` (fully enforced, no residual) pushes. The asymmetry is inherited from M2's C2/C3 resolution, not introduced here, and it is a missed optimization rather than a wrong answer. §11 pins the actual behavior with a test so the documented asymmetry matches the planner rather than an assumption about it.
+5. **`min`/`max(DOUBLE)` over a column holding both `-0.0` and `0.0` may differ in the sign of the returned zero.** AQL's `MIN`/`MAX` treat them as equal (they compare equal) and keep whichever the plan reaches first, whereas Trino's comparison orders `-0.0` before `0.0`. The two results are equal under SQL `=`; only the printed sign differs. Declining `min`/`max(DOUBLE)` over this would cost far more than the defect is worth.
+6. **`count(col)` is exact up to 2⁵³ non-null rows.** It renders as `SUM(pred ? 1 : 0)` and AQL accumulates sums in double (§4/15). This is the same argument that declined `sum(BIGINT)`; it is tolerated here only because the bound is 9 quadrillion rows in a single collection.
+7. **`SELECT DISTINCT col ... LIMIT n` does not push.** Trino plans it as a `DistinctLimitNode`, which `PushAggregationIntoTableScan` does not match, so the zero-aggregate claim in §5 does not reach it. Missed optimization only.
+8. **A residual filter can block aggregation pushdown entirely.** Trino's `PushAggregationIntoTableScan` matches `aggregation(tableScan())` and `aggregation(project(tableScan()))`; a residual predicate leaves a `FilterNode` in between. Because `BIGINT` range is deliberately *prefilter-only* — pushed to AQL **and** kept residual for Trino's re-check — `... WHERE bigint_col > 100 GROUP BY city` can fail to push its aggregate while the otherwise-identical `... WHERE double_col > 100 ...` (fully enforced, no residual) pushes. The asymmetry is inherited from M2's C2/C3 resolution, not introduced here, and it is a missed optimization rather than a wrong answer. §11 pins the actual behavior with a test so the documented asymmetry matches the planner rather than an assumption about it.
 
 ---
 
 ## 11. Testing
 
-**Container-free units** — `ColumnGuardTest` (every type's rendering, and that unsupported types decline), `AggregatePushdownTest` (the full §5 matrix and all eight §6 decline rules), `AqlBuilderAggregateTest` (rendered AQL string and bind vars for global, grouped, filtered, and limited shapes), `ArangoSplitManagerTest` (aggregated ⇒ one split, and the shard pipeline is not consulted — asserted via a client test double that fails if `getShardingInfo` is called), `ArangoMetadataTest` additions (the `applyFilter`-declines-on-aggregated and `limitGuaranteed` rules).
+**Container-free units** — `ColumnGuardTest` (every type's rendering, and that unsupported types decline), `AggregatePushdownTest` (the full §5 matrix, all ten §6 decline rules, and that an unrecognized function name declines), `AqlBuilderAggregateTest` (rendered AQL string and bind vars for global, grouped, filtered, and limited shapes), `ArangoSplitManagerTest` (aggregated ⇒ one split, and the shard pipeline is not consulted — asserted via a client test double that fails if `getShardingInfo` is called), `ArangoMetadataTest` additions (the `applyFilter`-declines-on-aggregated and `limitGuaranteed` rules).
 
-**`AqlSemanticsAssumptionsTest` additions** — every row of §4 pinned as an assertion against a live container, so a future ArangoDB upgrade that changes any of them fails loudly rather than silently changing results. This is the same instrument that pinned C1/C3 and is what keeps this design honest.
+**`AqlSemanticsAssumptionsTest` additions** — every row of §4 pinned as an assertion against a live container, so a future ArangoDB upgrade that changes any of them fails loudly rather than silently changing results. This is the same instrument that pinned C1/C3 and is what keeps this design honest. Two rules for these additions:
+
+- **Every grouping-related assertion runs under both `OPTIONS { method: "hash" }` and `OPTIONS { method: "sorted" }` and asserts they agree.** §4/18 is the proof that this matters: the two methods genuinely disagree on a bare accessor, and the optimizer's choice is not ours to make. A grouping rendering that passes under only one method is not correct.
+- The signed-zero, `2⁵³`-boundary, and byte-exact-string cases (§4/18–21) are pinned explicitly, not left implied by the numeric-friendly cases — that gap is what review finding B1 exploited.
 
 **Correctness ITs (`ArangoConnectorAggregationTest`, via `DistributedQueryRunner`)** — the decisive tests, over a deliberately dirty collection where each column holds a mix of matching, mismatched, null, and absent values, including int64 beyond 2⁵³:
 - every claimed aggregate returns **identical results with pushdown enabled and disabled** (`arangodb.aggregation-pushdown-enabled` toggled), which is the reference comparison the milestone's exit criterion asks for;
@@ -226,9 +250,12 @@ An aggregated handle emits exactly one split (master spec §6.4: Trino treats co
 - empty-table global aggregation returns one row with `count = 0` and `sum = NULL` (§4/3, §4/6);
 - a group whose values are all type-mismatched returns `sum = NULL`, `count = 0` (§4/2);
 - `GROUP BY` on a `DOUBLE` column containing `-0.0`, `0.0`, and `0` yields a single group (§4/10);
+- **`GROUP BY` on a `BIGINT` column containing `-0.0`, `0.0`, and `0` yields a single group** (§4/18–19 — the review-finding-B1 regression test), and one containing int64 `2⁵³+1` alongside double `2⁵³` yields two (§4/20);
+- `min`/`max` on a `DOUBLE` column containing int64 values beyond 2⁵³ agree pushed and unpushed (§4/22);
+- `count(1)` — pinning whether Trino 483 canonicalizes a constant argument to zero-arg `count`, since rule 7 otherwise declines a common query shape (if it does not canonicalize, widening rule 7 to accept a non-null `Constant` is a two-line follow-up);
 - `GROUP BY` where the column has stored-null and absent values yields one shared `NULL` group (§4/11);
 - `SELECT DISTINCT col` and bare `GROUP BY col` (zero aggregates) push and return the right groups;
-- **the residual-filter interaction (§10/5)**: an aggregate over a `DOUBLE`-range predicate and the same aggregate over a `BIGINT`-range predicate, asserting each one's actual pushdown status, so §10/5's text is pinned to observed planner behavior. This test is written early — before the rest of the IT suite — because if the `BIGINT` case does not push, every later `isFullyPushedDown()` assertion combining a filter with an aggregate has to be written accordingly.
+- **the residual-filter interaction (§10/8)**: an aggregate over a `DOUBLE`-range predicate and the same aggregate over a `BIGINT`-range predicate, asserting each one's actual pushdown status, so §10/8's text is pinned to observed planner behavior. This test is written early — before the rest of the IT suite — because if the `BIGINT` case does not push, every later `isFullyPushedDown()` assertion combining a filter with an aggregate has to be written accordingly.
 
 ---
 
@@ -244,6 +271,9 @@ An aggregated handle emits exactly one split (master spec §6.4: Trino treats co
 8. **`applyProjection` gains an explicit decline on aggregated handles** — today it declines only by coincidence (§6).
 9. **The branch opens with a formatting-only commit** (§8.1). This is the first milestone to modify ratcheted M1–M3 files, so the ratchet's cost is paid once, visibly, and separately from the logic diff.
 10. **Zero-aggregate grouping (`DISTINCT`, bare `GROUP BY`) is claimed** (§5), on the strength of §4/17.
+11. **`BIGINT` grouping keys normalize signed zero; `min`/`max(DOUBLE)` drop the `+ 0.0` promotion** (§7). Both came from review findings (B1, S1) and both are now measured (§4/18–19, §4/22). B1 was a live wrong-row-count defect under the `COLLECT` method the optimizer actually picks.
+12. **`VARCHAR` grouping keys survived review by measurement, not argument** (§4/21): AQL `==` and `COLLECT` are byte-exact, so ICU collation does not reach grouping. The same measurement independently confirms that M2's shipped `VARCHAR` equality pushdown is sound — worth noting because a contrary result would have been a defect in released behavior, not just in this design.
+13. **Aggregation declines over a prefilter-only constraint** (§6/10), making the §10/8 safety property local rather than dependent on Trino's planner shape.
 
 ---
 
@@ -274,4 +304,6 @@ Global aggregation arrives as `groupingSets = [[]]`; function names arrive lower
 
 ## Appendix B — Probe provenance
 
-The §4 table was produced on 2026-07-26 against `arangodb/arangodb:3.12` (reported `3.12.4-3`, community) via the HTTP `/_api/cursor` and `/_api/explain` endpoints, with fixture documents inserted as raw JSON so that int64/uint64/double storage types are genuine rather than query-string literals. Every row is reproduced as an assertion in `AqlSemanticsAssumptionsTest` by this milestone; the transcript itself is not checked in, since the test is the durable artifact.
+The §4 table was produced on 2026-07-26 in three rounds against `arangodb/arangodb:3.12` (reported `3.12.4-3`, community) via the HTTP `/_api/cursor` and `/_api/explain` endpoints, with fixture documents inserted as raw JSON so that int64/uint64/double storage types are genuine rather than query-string literals. Every row is reproduced as an assertion in `AqlSemanticsAssumptionsTest` by this milestone; the transcript itself is not checked in, since the test is the durable artifact.
+
+Rounds 1–2 (§4/1–17) established the aggregate-function semantics and validated the generated query shapes end to end. Round 3 (§4/18–23) was driven by an adversarial design review and targeted the half of the exactness claim that rounds 1–2 had established by *inference* rather than measurement — `COLLECT` grouping equality at the signed-zero and 2⁵³ boundaries, string equality against ICU-collation-edge pairs, and the `+ 0.0` promotion's effect on `min`/`max`. That round found one live defect (B1) and refuted one suspected defect (B2), which is the argument for extending the probe matrix rather than reasoning about it.
