@@ -13,6 +13,7 @@ import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.MaterializedResult;
 import io.trino.testing.QueryRunner;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
@@ -46,22 +47,29 @@ class ArangoConnectorAggregationTest extends AbstractTestQueryFramework {
             seed.insertForTest(
                     "agg", "sales", Map.of("city", "sfo", "qty", 7L, "price", 4.0, "vip", true));
 
-            // Dirty fixture: the first two documents type the columns (sample-size 2), so the
-            // later mismatched / absent / out-of-range values are invisible to inference and
-            // exercise the guards. This depends on sampleDocuments' unsorted LIMIT landing on
-            // insertion order -- the same assumption ArangoConnectorPushdownTest documents and
-            // relies on (empirically stable on a fresh collection, not an AQL guarantee).
+            // Dirty fixture: only the CLEAN documents exist at schema-resolution time, so the
+            // columns infer as VARCHAR/BIGINT/DOUBLE. The mismatched, absent and out-of-range
+            // values are added after the schema is resolved and cached (see below), which is what
+            // makes them invisible to inference and forces the guards to do the work.
+            //
+            // Determinism note: an earlier version simply inserted the dirty documents last and
+            // relied on sampleDocuments' unsorted `LIMIT n` returning insertion order -- stable in
+            // practice but not an AQL guarantee. Warming the schema cache instead removes the
+            // dependency on scan order entirely.
             seed.createDocumentCollectionForTest("agg", "dirty");
-            seed.insertForTest("agg", "dirty", Map.of("g", "a", "n", 10L, "x", 1.0));
-            seed.insertForTest("agg", "dirty", Map.of("g", "b", "n", 20L, "x", 2.0));
-            seed.insertForTest("agg", "dirty", Map.of("g", "a", "n", 42.5, "x", "not-a-number"));
-            seed.insertForTest("agg", "dirty", Map.of("g", "b", "n", 1e19, "x", 4.0));
-            seed.insertForTest("agg", "dirty", Map.of("g", "a"));
-            Map<String, Object> allNullGroup = new HashMap<>();
-            allNullGroup.put("g", "c");
-            allNullGroup.put("n", null);
-            allNullGroup.put("x", null);
-            seed.insertForTest("agg", "dirty", allNullGroup);
+            seed.insertForTest("agg", "dirty", Map.of("g", "a", "n", 10L, "x", 1.5));
+            seed.insertForTest("agg", "dirty", Map.of("g", "b", "n", 20L, "x", 2.5));
+
+            // Nested-field fixture: applyProjection rewrites `addr.city` into a synthetic
+            // `addr$city` column handle, which applyAggregation then groups by -- two pushdowns
+            // composing, which nothing else exercises through SQL.
+            seed.createDocumentCollectionForTest("agg", "people");
+            seed.insertForTest(
+                    "agg", "people", Map.of("addr", Map.of("city", "nyc", "zip", "10001")));
+            seed.insertForTest(
+                    "agg", "people", Map.of("addr", Map.of("city", "nyc", "zip", "10002")));
+            seed.insertForTest(
+                    "agg", "people", Map.of("addr", Map.of("city", "sfo", "zip", "94101")));
 
             // Review finding B1: a BIGINT column holding 0, -0.0 and 0.0. All three read back as
             // BIGINT 0, so SQL sees exactly one group.
@@ -94,6 +102,27 @@ class ArangoConnectorAggregationTest extends AbstractTestQueryFramework {
                         .putAll(base)
                         .put("arangodb.aggregation-pushdown-enabled", "false")
                         .buildOrThrow());
+
+        // Resolve and cache the "dirty" schema from the clean documents only -- one query per
+        // catalog, since each has its own connector and therefore its own schema cache (TTL 5m,
+        // far longer than this class runs). Only then add the documents that contradict it.
+        runner.execute("SELECT g, n, x FROM arango.agg.dirty");
+        runner.execute("SELECT g, n, x FROM noagg.agg.dirty");
+        try (ArangoClient seed =
+                new ArangoClient(
+                        new ArangoConfig()
+                                .setHosts(server.hostPort())
+                                .setUser("root")
+                                .setPassword(server.rootPassword()))) {
+            seed.insertForTest("agg", "dirty", Map.of("g", "a", "n", 42.5, "x", "not-a-number"));
+            seed.insertForTest("agg", "dirty", Map.of("g", "b", "n", 1e19, "x", 4.5));
+            seed.insertForTest("agg", "dirty", Map.of("g", "a"));
+            Map<String, Object> allNullGroup = new HashMap<>();
+            allNullGroup.put("g", "c");
+            allNullGroup.put("n", null);
+            allNullGroup.put("x", null);
+            seed.insertForTest("agg", "dirty", allNullGroup);
+        }
         return runner;
     }
 
@@ -331,6 +360,58 @@ class ArangoConnectorAggregationTest extends AbstractTestQueryFramework {
                 "SELECT min(city) FROM arango.agg.sales",
                 stats -> assertThat(stats.getPhysicalInputPositions()).isEqualTo(3),
                 results -> {});
+    }
+
+    // applyProjection turns `addr.city` into a synthetic addr$city handle and applyAggregation
+    // groups by it -- two pushdowns composing. Unit- and wire-tested, but no SQL query exercised
+    // the pair until now.
+    // Guards the guards. Every dirty-data assertion compares pushed against unpushed, and BOTH
+    // sides use the same inferred schema -- so if the fixture silently stopped being dirty, those
+    // tests would keep passing while testing nothing. This pins the two properties they depend on.
+    //
+    // It exists because the fixture DID silently stop being dirty: `x` was seeded as 1.0/2.0, and
+    // VelocyPack normalizes an integral double to an integer at insert, so `x` inferred as BIGINT
+    // and `sum(x)`/`avg(x)` exercised the DECLINED bigint path instead of the guarded DOUBLE one.
+    // Real fractions (1.5/2.5) keep it a DOUBLE column. The same normalization is why design
+    // §4/12's original int-vs-double grouping probe was vacuous.
+    @Test
+    void dirtyFixtureIsActuallyDirty() {
+        assertThat(computeActual("DESCRIBE arango.agg.dirty").getMaterializedRows())
+                .as("column types the guard tests depend on")
+                .anySatisfy(
+                        r ->
+                                assertThat(List.of(r.getField(0), r.getField(1)))
+                                        .isEqualTo(List.of("n", "bigint")))
+                .anySatisfy(
+                        r ->
+                                assertThat(List.of(r.getField(0), r.getField(1)))
+                                        .isEqualTo(List.of("x", "double")))
+                .anySatisfy(
+                        r ->
+                                assertThat(List.of(r.getField(0), r.getField(1)))
+                                        .isEqualTo(List.of("g", "varchar")));
+
+        // Six documents, but the guards must reject most values of n and x: n keeps only 10 and 20
+        // (42.5 is fractional, 1e19 is outside int64, one absent, one stored null); x keeps the
+        // three numerics and rejects "not-a-number", the absent field and the stored null.
+        MaterializedResult counts =
+                computeActual("SELECT count(*), count(n), count(x) FROM arango.agg.dirty");
+        assertThat(counts.getMaterializedRows().get(0).getField(0)).isEqualTo(6L);
+        assertThat(counts.getMaterializedRows().get(0).getField(1)).isEqualTo(2L);
+        assertThat(counts.getMaterializedRows().get(0).getField(2)).isEqualTo(3L);
+    }
+
+    @Test
+    void groupByOnANestedFieldMatchesTheReference() {
+        assertSameAsReference("SELECT addr.city, count(*) FROM %s.people GROUP BY addr.city");
+        assertSameAsReference(
+                "SELECT addr.city, count(addr.zip) FROM %s.people GROUP BY addr.city");
+        assertThat(
+                        computeActual(
+                                        "SELECT addr.city, count(*) FROM arango.agg.people"
+                                                + " GROUP BY addr.city")
+                                .getMaterializedRows())
+                .hasSize(2);
     }
 
     @Test
