@@ -1,15 +1,14 @@
 package io.arango.trino.handle;
 
+import static java.util.Objects.requireNonNull;
+
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.predicate.TupleDomain;
-
 import java.util.OptionalLong;
-
-import static java.util.Objects.requireNonNull;
 
 public record ArangoTableHandle(
         @JsonProperty("schema") String schema,

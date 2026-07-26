@@ -8,7 +8,6 @@ import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.ValueSet;
 import io.trino.spi.type.DoubleType;
-
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -25,12 +24,19 @@ public class AqlBuilder {
         StringBuilder aql = new StringBuilder("FOR d IN @@col");
 
         List<String> filters = new ArrayList<>();
-        table.constraint().getDomains().ifPresent(domains -> {
-            for (Map.Entry<ColumnHandle, Domain> entry : domains.entrySet()) {
-                ArangoColumnHandle column = (ArangoColumnHandle) entry.getKey();
-                filters.add("(" + renderDomain(column, entry.getValue(), bindVars, counter) + ")");
-            }
-        });
+        table.constraint()
+                .getDomains()
+                .ifPresent(
+                        domains -> {
+                            for (Map.Entry<ColumnHandle, Domain> entry : domains.entrySet()) {
+                                ArangoColumnHandle column = (ArangoColumnHandle) entry.getKey();
+                                filters.add(
+                                        "("
+                                                + renderDomain(
+                                                        column, entry.getValue(), bindVars, counter)
+                                                + ")");
+                            }
+                        });
         if (!filters.isEmpty()) {
             aql.append(" FILTER ").append(String.join(" AND ", filters));
         }
@@ -48,17 +54,24 @@ public class AqlBuilder {
     //
     // DOUBLE promotion: a stored int64 in a DOUBLE column is read back rounded to double
     // (ValueMaterializer does n.doubleValue()), but ArangoDB compares int64-vs-double by
-    // exact mathematical value, not in double space -- so a bare `d.f <op> @v` diverges from the read
+    // exact mathematical value, not in double space -- so a bare `d.f <op> @v` diverges from the
+    // read
     // path for magnitudes > 2^53 (a stored 2^53+1 satisfies `> 2^53` in AQL yet reads back as 2^53,
-    // and `== 2^54` misses a stored 2^54-1 that reads back as 2^54). Promoting the operand into double
+    // and `== 2^54` misses a stored 2^54-1 that reads back as 2^54). Promoting the operand into
+    // double
     // space with `+ 0.0` makes AQL compare exactly the value the read path emits, keeping DOUBLE
     // pushdown fully enforced. The IS_NUMBER guard is required first because `+ 0.0` coerces
-    // non-numbers ("abc" + 0.0 == 0.0); AQL's AND short-circuits, so the guard protects the arithmetic.
-    // This promotion is DOUBLE-only on purpose: BIGINT reads exactly (longValue(), no rounding) against
-    // long binds, so bare exact comparison is what agrees there -- promoting BIGINT would create the
-    // mirror bug. Likewise the DOUBLE-equality IS_NUMBER guard must not leak onto BOOLEAN/VARCHAR/BIGINT,
+    // non-numbers ("abc" + 0.0 == 0.0); AQL's AND short-circuits, so the guard protects the
+    // arithmetic.
+    // This promotion is DOUBLE-only on purpose: BIGINT reads exactly (longValue(), no rounding)
+    // against
+    // long binds, so bare exact comparison is what agrees there -- promoting BIGINT would create
+    // the
+    // mirror bug. Likewise the DOUBLE-equality IS_NUMBER guard must not leak onto
+    // BOOLEAN/VARCHAR/BIGINT,
     // whose equality is already type-exact in AQL.
-    private static String renderDomain(ArangoColumnHandle column, Domain domain, Map<String, Object> bindVars, int[] counter) {
+    private static String renderDomain(
+            ArangoColumnHandle column, Domain domain, Map<String, Object> bindVars, int[] counter) {
         String accessor = documentAccessor(column.path());
         boolean isDouble = column.type().equals(DoubleType.DOUBLE);
         String cmp = isDouble ? "(" + accessor + " + 0.0)" : accessor;
@@ -79,15 +92,22 @@ public class AqlBuilder {
         // Numeric range (ArangoMetadata.isPushable only admits this for BIGINT/DOUBLE). AQL's <,>
         // use a total cross-type ordering (null<bool<number<string), so d.f>@v would also match
         // non-numbers; guard with IS_NUMBER. Both BIGINT and DOUBLE use a bare IS_NUMBER guard:
-        //   - We deliberately do NOT add an integrality guard for BIGINT. The obvious `d.f == FLOOR(d.f)`
-        //     is broken: AQL FLOOR() returns a double, and ArangoDB compares int64-vs-double by exact
-        //     value, so a stored int64 that isn't exactly double-representable (e.g. 2^53+1) fails the
-        //     guard and is dropped server-side even though the read path reads it exactly via longValue()
+        //   - We deliberately do NOT add an integrality guard for BIGINT. The obvious `d.f ==
+        // FLOOR(d.f)`
+        //     is broken: AQL FLOOR() returns a double, and ArangoDB compares int64-vs-double by
+        // exact
+        //     value, so a stored int64 that isn't exactly double-representable (e.g. 2^53+1) fails
+        // the
+        //     guard and is dropped server-side even though the read path reads it exactly via
+        // longValue()
         //     -- a silent false-miss (review finding C3). It is also unnecessary: BIGINT range is
-        //     prefilter-only (isPrefilterOnly), so the guard only needs to admit a SUPERSET -- a fractional
-        //     35.5 or an out-of-long-range integer passes IS_NUMBER, reads back NULL, and Trino's residual
+        //     prefilter-only (isPrefilterOnly), so the guard only needs to admit a SUPERSET -- a
+        // fractional
+        //     35.5 or an out-of-long-range integer passes IS_NUMBER, reads back NULL, and Trino's
+        // residual
         //     re-check excludes it.
-        //   - DOUBLE promotes its operands with `+ 0.0` (via cmp above) so the comparison itself agrees
+        //   - DOUBLE promotes its operands with `+ 0.0` (via cmp above) so the comparison itself
+        // agrees
         //     with the read path; the IS_NUMBER guard still excludes non-numbers.
         String guard = "IS_NUMBER(" + accessor + ")";
         List<String> rangeClauses = new ArrayList<>();
@@ -95,16 +115,32 @@ public class AqlBuilder {
             List<String> bounds = new ArrayList<>();
             if (!range.isLowUnbounded()) {
                 String op = range.isLowInclusive() ? " >= @" : " > @";
-                bounds.add(cmp + op + bindValue(bindVars, counter, toBindValue(range.getLowBoundedValue())));
+                bounds.add(
+                        cmp
+                                + op
+                                + bindValue(
+                                        bindVars,
+                                        counter,
+                                        toBindValue(range.getLowBoundedValue())));
             }
             if (!range.isHighUnbounded()) {
                 String op = range.isHighInclusive() ? " <= @" : " < @";
-                bounds.add(cmp + op + bindValue(bindVars, counter, toBindValue(range.getHighBoundedValue())));
+                bounds.add(
+                        cmp
+                                + op
+                                + bindValue(
+                                        bindVars,
+                                        counter,
+                                        toBindValue(range.getHighBoundedValue())));
             }
             // isPushable guarantees a real range (not all, not discrete), so bounds is non-empty.
-            rangeClauses.add(bounds.size() == 1 ? bounds.get(0) : "(" + String.join(" AND ", bounds) + ")");
+            rangeClauses.add(
+                    bounds.size() == 1 ? bounds.get(0) : "(" + String.join(" AND ", bounds) + ")");
         }
-        String ranges = rangeClauses.size() == 1 ? rangeClauses.get(0) : "(" + String.join(" OR ", rangeClauses) + ")";
+        String ranges =
+                rangeClauses.size() == 1
+                        ? rangeClauses.get(0)
+                        : "(" + String.join(" OR ", rangeClauses) + ")";
         return guard + " AND " + ranges;
     }
 
@@ -132,7 +168,9 @@ public class AqlBuilder {
                 sb.append(", ");
             }
             ArangoColumnHandle column = columns.get(i);
-            sb.append(quoteAqlString(column.name())).append(": ").append(documentAccessor(column.path()));
+            sb.append(quoteAqlString(column.name()))
+                    .append(": ")
+                    .append(documentAccessor(column.path()));
         }
         return sb.append("}").toString();
     }
