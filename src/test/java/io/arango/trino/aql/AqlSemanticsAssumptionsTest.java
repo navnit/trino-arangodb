@@ -199,6 +199,206 @@ class AqlSemanticsAssumptionsTest {
                 .isEqualTo(0);
     }
 
+    // ---------------------------------------------------------------------------------------
+    // M5 (aggregation pushdown). Every rendering in AqlBuilder.buildAggregate and ColumnGuard
+    // rests on one of the facts below; pinning them means an ArangoDB upgrade that changes any
+    // of them fails loudly here instead of silently changing query results.
+    // ---------------------------------------------------------------------------------------
+
+    // §4/1: AQL COUNT is an alias of LENGTH -- it counts nulls, so Trino's count(col) cannot map
+    // to it and must sum a guard predicate instead.
+    @Test
+    void aqlCountIsLengthAndCountsNulls() {
+        assertThat(((Number) eval("COUNT([1,null,2])")).longValue()).isEqualTo(3);
+        assertThat(((Number) eval("LENGTH([1,null,2])")).longValue()).isEqualTo(3);
+    }
+
+    // §4/2, §4/5: aggregates ignore nulls, but SUM of an all-null input is 0 where SQL says NULL.
+    // That gap is exactly what the companion count in buildAggregate exists to close.
+    @Test
+    void aqlSumIgnoresNullsButReturnsZeroWhenEverythingIsNull() {
+        assertThat(((Number) eval("SUM([1,2,null])")).longValue()).isEqualTo(3);
+        assertThat(((Number) eval("SUM([null,null])")).longValue()).isEqualTo(0);
+        assertThat(eval("AVERAGE([null,null])")).isNull();
+        assertThat(eval("MIN([null,null])")).isNull();
+    }
+
+    // §4/23: load-bearing for the sum fix-up `(companion > 0 ? sum : null)` on an empty table,
+    // where the companion itself comes back null.
+    @Test
+    void nullComparesFalseAgainstZero() {
+        assertThat(eval("null > 0")).isEqualTo(false);
+    }
+
+    // §3: the unguarded danger, measured. AQL's total cross-type ordering (null < bool < number <
+    // string) makes MIN return a boolean and MAX a string over a mixed column, and a single
+    // string poisons SUM to null -- none of which matches what the read path would compute.
+    @Test
+    void unguardedMinMaxCrossTypeOrderingIsWhyGuardsExist() {
+        assertThat(eval("MIN([5,\"a\",null,true])")).isEqualTo(true);
+        assertThat(eval("MAX([5,\"a\",null,true])")).isEqualTo("a");
+        assertThat(eval("SUM([1,2,\"3\"])")).isNull();
+    }
+
+    // §4/3, §4/6: a global aggregation over an empty collection still emits exactly one row, but
+    // its SUM is null -- which is why count(col) is wrapped `== null ? 0`.
+    @Test
+    void globalAggregateOverZeroRowsEmitsOneRowWithNullSum() {
+        client.createDocumentCollectionForTest("probe", "m5empty");
+        Map<String, Object> row =
+                client.query(
+                                "probe",
+                                "FOR d IN m5empty COLLECT AGGREGATE s = SUM(d.v), n = LENGTH(1)"
+                                        + " RETURN { s, n }",
+                                Map.of())
+                        .next();
+        assertThat(row.get("s")).isNull();
+        assertThat(((Number) row.get("n")).longValue()).isEqualTo(0);
+    }
+
+    // §4/8-9: the compound integrality guard is correct where a bare FLOOR test (finding C3) is
+    // not, because no double at or above 2^53 can carry a fractional part; and the long-range
+    // bound is exact because ArangoDB compares int64 against double by exact mathematical value.
+    // This is ColumnGuard.predicate(BIGINT) verbatim.
+    @Test
+    void bigintGuardMatchesTheReadPathAtEveryBoundary() {
+        String guard =
+                "IS_NUMBER(%1$s) AND %1$s >= -9223372036854775808 AND %1$s < 9223372036854775808"
+                        + " AND (ABS(%1$s) >= 9007199254740992 OR %1$s == FLOOR(%1$s))";
+        assertThat(eval(guard.formatted("42"))).as("small int").isEqualTo(true);
+        assertThat(eval(guard.formatted("0"))).as("zero").isEqualTo(true);
+        assertThat(eval(guard.formatted("42.5"))).as("fraction").isEqualTo(false);
+        assertThat(eval(guard.formatted("-0.5"))).as("negative fraction").isEqualTo(false);
+        assertThat(eval(guard.formatted("9007199254740993"))).as("2^53+1").isEqualTo(true);
+        assertThat(eval(guard.formatted("-9007199254740993"))).as("-(2^53+1)").isEqualTo(true);
+        assertThat(eval(guard.formatted("9223372036854775807"))).as("int64 max").isEqualTo(true);
+        assertThat(eval(guard.formatted("1e19"))).as("above 2^63").isEqualTo(false);
+        assertThat(eval(guard.formatted("-1e19"))).as("below -2^63").isEqualTo(false);
+        assertThat(eval(guard.formatted("\"x\""))).as("string").isEqualTo(false);
+        assertThat(eval(guard.formatted("null"))).as("null").isEqualTo(false);
+        assertThat(eval(guard.formatted("true"))).as("bool").isEqualTo(false);
+        // The exact-value int64-vs-double comparison the range bound depends on:
+        assertThat(eval("9223372036854775807 < 9223372036854775808")).isEqualTo(true);
+    }
+
+    // §4/15: AQL accumulates sums in double, so sum(BIGINT) is not claimable -- precision is lost
+    // past 2^53 and Trino's loud sum(bigint) overflow would become silent.
+    @Test
+    void aqlSumAccumulatesInDoubleSoBigintSumIsNotClaimable() {
+        assertThat(eval("SUM([9007199254740993, 1]) == 9007199254740992")).isEqualTo(true);
+    }
+
+    // §4/14: a double sum that overflows reads back as 0, not Infinity -- JSON/VelocyPack cannot
+    // carry non-finite doubles. Accepted limitation (design §10/1), pinned so it stays visible.
+    @Test
+    void doubleSumOverflowReadsAsZeroNotInfinity() {
+        assertThat(((Number) eval("SUM([1.7976931348623157e308, 1.7976931348623157e308])"))
+                        .doubleValue())
+                .isEqualTo(0.0);
+    }
+
+    // §4/21: AQL equality is byte-exact, not collation-based. This is what makes VARCHAR grouping
+    // keys safe, and it independently confirms M2's already-shipped VARCHAR equality pushdown --
+    // a contrary result would have been a defect in released behavior.
+    @Test
+    void stringEqualityIsByteExactNotCollationBased() {
+        assertThat(eval("\"ab\" == \"a\\u00ADb\"")).as("soft hyphen").isEqualTo(false);
+        assertThat(eval("\"\\u00E9\" == \"e\\u0301\"")).as("NFC vs NFD").isEqualTo(false);
+        assertThat(eval("\"a\" == \"A\"")).as("case").isEqualTo(false);
+    }
+
+    // §4/18-19: THE review-finding-B1 pin. The two COLLECT methods disagree on a bare accessor --
+    // a stored -0.0 gets its own group under `hash`, which is the method the optimizer picks for
+    // M5's shape -- so one Trino group would be emitted as two final rows. Normalizing by exact
+    // numeric equality (ColumnGuard's BIGINT grouping value) makes both methods agree on one.
+    @Test
+    void bigintGroupingNeedsSignedZeroNormalizationAndAgreesUnderBothCollectMethods() {
+        client.createDocumentCollectionForTest("probe", "m5zeros");
+        client.insertForTest("probe", "m5zeros", Map.of("v", 0L));
+        client.insertForTest("probe", "m5zeros", Map.of("v", -0.0d));
+        client.insertForTest("probe", "m5zeros", Map.of("v", 0.0d));
+
+        assertThat(groupCount("m5zeros", "d.v", "hash"))
+                .as("bare key under hash splits signed zero -- the defect")
+                .isEqualTo(2);
+        assertThat(groupCount("m5zeros", "d.v", "sorted"))
+                .as("...and the methods disagree, so one method's result binds nothing")
+                .isEqualTo(1);
+
+        String normalized = "d.v == 0 ? 0 : d.v";
+        assertThat(groupCount("m5zeros", normalized, "hash")).isEqualTo(1);
+        assertThat(groupCount("m5zeros", normalized, "sorted")).isEqualTo(1);
+    }
+
+    // §4/24: COLLECT groups by numeric value, not stored representation, so a BIGINT key needs no
+    // canonicalizer beyond the signed-zero normalization. Verified at 2^53, where a stored
+    // double's ".0" survives -- at 42 VelocyPack normalizes 42.0 to int, which would make the
+    // test vacuous.
+    @Test
+    void int64AndDoubleOfEqualValueShareAGroupUnderBothMethods() {
+        client.createDocumentCollectionForTest("probe", "m5reps");
+        client.insertForTest("probe", "m5reps", Map.of("v", 9007199254740992L));
+        client.insertForTest("probe", "m5reps", Map.of("v", 9007199254740992.0d));
+        assertThat(eval("TO_STRING(9007199254740992.0)"))
+                .as("the two representations really are distinct at this magnitude")
+                .isEqualTo("9007199254740992.0");
+
+        assertThat(groupCount("m5reps", "d.v == 0 ? 0 : d.v", "hash")).isEqualTo(1);
+        assertThat(groupCount("m5reps", "d.v == 0 ? 0 : d.v", "sorted")).isEqualTo(1);
+    }
+
+    // §4/20: distinct values stay distinct at the 2^53 boundary -- BIGINT grouping is exact.
+    @Test
+    void distinctInt64AndDoubleStaySeparateGroups() {
+        client.createDocumentCollectionForTest("probe", "m5boundary");
+        client.insertForTest("probe", "m5boundary", Map.of("v", 9007199254740993L));
+        client.insertForTest("probe", "m5boundary", Map.of("v", 9007199254740992.0d));
+        assertThat(groupCount("m5boundary", "d.v == 0 ? 0 : d.v", "hash")).isEqualTo(2);
+        assertThat(groupCount("m5boundary", "d.v == 0 ? 0 : d.v", "sorted")).isEqualTo(2);
+    }
+
+    // §4/13: count(*) needs no special AQL form -- AGGREGATE LENGTH(1) plans to the same
+    // CollectNode as COLLECT WITH COUNT INTO, so one code path serves both.
+    @Test
+    void lengthAggregateCountsRows() {
+        client.createDocumentCollectionForTest("probe", "m5rows");
+        client.insertForTest("probe", "m5rows", Map.of("v", 1L));
+        client.insertForTest("probe", "m5rows", Map.of("v", 2L));
+        Object n =
+                client.query(
+                                "probe",
+                                "FOR d IN m5rows COLLECT AGGREGATE n = LENGTH(1) RETURN { n }",
+                                Map.of())
+                        .next()
+                        .get("n");
+        assertThat(((Number) n).longValue()).isEqualTo(2);
+    }
+
+    // §4/22: rounding is monotone, so the bare MAX of int64s -- rounded when the read path applies
+    // doubleValue() -- equals the promoted MAX. That is why min/max(DOUBLE) must NOT promote
+    // (promotion would turn a stored -0.0 into 0.0; review finding S1).
+    @Test
+    void bareExtremumThenRoundingEqualsPromotedExtremum() {
+        assertThat(eval("(MAX([9007199254740993, 9007199254740995]) + 0.0) =="
+                        + " MAX([9007199254740993 + 0.0, 9007199254740995 + 0.0])"))
+                .isEqualTo(true);
+    }
+
+    /** Number of groups a COLLECT on {@code keyExpression} produces under {@code method}. */
+    private int groupCount(String collection, String keyExpression, String method) {
+        // RETURN an object, not the bare group key: ArangoClient.query deserializes rows as Map.
+        String aql =
+                "FOR d IN %s COLLECT g = (%s) OPTIONS { method: \"%s\" } RETURN { g }"
+                        .formatted(collection, keyExpression, method);
+        int groups = 0;
+        var cursor = client.query("probe", aql, Map.of());
+        while (cursor.hasNext()) {
+            cursor.next();
+            groups++;
+        }
+        return groups;
+    }
+
     private long countMatches(String collection, String predicate, Object bind) {
         Object r =
                 client.query(
