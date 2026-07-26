@@ -4,6 +4,13 @@ on:
   push:
     branches: [master]
   pull_request:
+  # Nightly run of the cluster ITs against master. On this trigger the cluster job is
+  # BLOCKING (see its continue-on-error expression), so a genuine shard-parallelism or
+  # aggregation regression shows up as a red run on the default branch instead of being
+  # swallowed by the PR-time job's flake tolerance.
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
 
 # Cancel superseded runs on the same ref (e.g. a new push to an open PR).
 concurrency:
@@ -67,16 +74,20 @@ jobs:
           if-no-files-found: warn
 
   # Heavy multi-node ArangoDB cluster ITs, run in isolation so they never gate a PR.
-  # continue-on-error makes the whole job non-blocking: it exercises shard fan-out
-  # end-to-end and surfaces its result, but a slow/failed cluster boot on a resource-starved
-  # runner does not fail the overall CI run. surefire.skip=true skips the unit + e2e phase so
-  # the cluster boot gets a clean, uncontended runner (the earlier container tests were part
-  # of what starved it). Invoked via the cluster-its profile, which flips the failsafe tag
-  # filter to run ONLY the @Tag("cluster") ITs.
+  # surefire.skip=true skips the unit + e2e phase so the cluster boot gets a clean,
+  # uncontended runner (the earlier container tests were part of what starved it). Invoked via
+  # the cluster-its profile, which flips the failsafe tag filter to run ONLY @Tag("cluster") ITs.
+  #
+  # Blocking policy: non-blocking on pull_request/push, because a slow cluster boot on a
+  # resource-starved runner must not fail an unrelated PR -- but BLOCKING on the nightly
+  # schedule (and on manual dispatch), where flake tolerance is no longer worth the cost of
+  # never noticing a real break. These ITs cover behavior nothing else can: shard fan-out
+  # correctness, and the single-split rule for aggregated handles, whose failure mode
+  # (duplicate "final" rows) only occurs on a genuinely sharded collection.
   cluster-its:
-    name: Cluster ITs (non-blocking)
+    name: Cluster ITs
     runs-on: ubuntu-latest
-    continue-on-error: true
+    continue-on-error: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -98,6 +109,16 @@ jobs:
           echo "Runner Docker Server API version: ${DOCKER_API}"
           mvn -B --no-transfer-progress -Ddocker.api.version="${DOCKER_API}" \
             -Pcluster-its -Dsurefire.skip=true verify
+
+      # Without this a nightly failure shows only "the job went red" -- the reports are what
+      # make it diagnosable after the runner is gone.
+      - name: Upload failsafe reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cluster-it-reports
+          path: target/failsafe-reports/
+          retention-days: 14
 
   # Docker-free static analysis (Spotless / Checkstyle / SpotBugs+FindSecBugs). Runs in
   # parallel with 'build' and finishes in ~1-2 min, giving fast feedback while the
