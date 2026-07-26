@@ -77,6 +77,12 @@ The gate reads `plan.collections[]` only. Write **node** types are recorded abov
 
 **Defence in depth.** This gate is a guard rail, not the primary control. The deployment guidance remains a read-only ArangoDB user, and §7's kill switch removes the surface entirely.
 
+### 3.0 Ordering invariant
+
+> **The gate runs to completion before anything executes the user's query.**
+
+This is a correctness requirement, not a convenience. `firstBatch` (§4) executes the query *for real* — if the two steps were transposed, a query the gate is about to reject would already have written. `analyze()` must therefore call `explainQuery` → `AqlReadOnlyGate.check` → and only on a clean verdict `firstBatch`. The e2e test in §11 asserts this by checking that a rejected `INSERT` left the target collection's count unchanged, which is the assertion that fails if the ordering ever inverts; asserting only that the error was raised would not catch it.
+
 ### 3.1 Undeclared bind parameters
 
 Explain **rejects** a query with an undeclared bind parameter (HTTP 400, `no value specified for declared bind parameter 'minAge'`). Since the PTF accepts no bind values, such a query could never execute either. It is therefore a normal, tested rejection path (§8), not a gate limitation.
@@ -141,6 +147,12 @@ Two existing unconditional casts are the concrete dispatch points to fix, and ea
 - `ArangoPageSourceProvider.createPageSource` — `ArangoTableHandle handle = (ArangoTableHandle) table;`
 - `ArangoSplitManager.getSplits` — the equivalent cast before shard discovery.
 
+### 5.2 The handle carries no `SchemaTableName`
+
+Mongo's PTF sidesteps this: its `QueryFunctionHandle` wraps a real `MongoTableHandle`, which already has a `SchemaTableName`. `ArangoQueryHandle` is `(database, query, columns)` and has no table identity, so any `ConnectorMetadata` method that needs a name must synthesize one: **`new SchemaTableName(database, "query")`** — stable, and it renders legibly in `EXPLAIN` output.
+
+**Open, to settle in the plan's first task:** whether Trino invokes `getTableMetadata` / `getColumnHandles` on a PTF-derived handle at all, given that `TableFunctionAnalysis`'s `Descriptor` already fixes the returned type and `applyTableFunction` returns the column handles directly. If it does not, the corresponding rows in §8 are work that isn't needed and should be dropped rather than written defensively. This is a cheap empirical check against `DistributedQueryRunner`, not a design question.
+
 ---
 
 ## 6. Decline surface
@@ -201,6 +213,7 @@ Each row above is a test, not a comment. This is the failure family that produce
 | Explain rejects the query (syntax error, undeclared bind parameter) | `INVALID_FUNCTION_ARGUMENT` carrying the server's message |
 | Non-object or empty result batch | `INVALID_FUNCTION_ARGUMENT` with corrective guidance (§4.1) |
 | Database not found (driver error 1228) | `TableNotFoundException`, consistent with `ArangoMetadata`'s existing 1228 handling |
+| Collection named in the query does not exist (driver error 1203) | `INVALID_FUNCTION_ARGUMENT` carrying the server's message. This is a *user* error in a user-supplied string — routing it to `GENERIC_INTERNAL_ERROR` would misreport a typo as a connector fault |
 | Any other `ArangoDBException` | `GENERIC_INTERNAL_ERROR`, consistent with the existing translation rule |
 
 `analyze()` is the first path on which `ArangoClient` is called from **planning**, on the coordinator. These errors therefore surface during analysis rather than execution, which changes where a user sees them.
@@ -227,7 +240,7 @@ Each row above is a test, not a comment. This is the failure family that produce
 | `ArangoQueryHandleTest` | unit | Jackson round-trip |
 | `ArangoMetadataPassthroughTest` | unit | All four hooks decline (§6) |
 | `ArangoSplitManagerTest` | unit | One split, no shard discovery invoked |
-| `ArangoConnectorQueryFunctionTest` | e2e (`DistributedQueryRunner`) | Traversal returns correct rows; `INSERT` rejected; disabled flag hides the function |
+| `ArangoConnectorQueryFunctionTest` | e2e (`DistributedQueryRunner`) | Traversal returns correct rows; an `INSERT` is rejected **and the target collection's count is unchanged** (§3.0); disabled flag hides the function |
 | `PassthroughClusterIT` | cluster | A `WITH`-declared traversal end-to-end — the case that killed §7's wrapper |
 
 ---
