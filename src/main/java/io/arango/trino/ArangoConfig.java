@@ -35,6 +35,7 @@ public class ArangoConfig {
     private int shardsPerSplit = 1;
     private int maxSplits = 32;
     private boolean shardParallelismEnabled = true;
+    private boolean aggregationPushdownEnabled = true;
 
     @NotNull
     public String getHosts() {
@@ -165,6 +166,18 @@ public class ArangoConfig {
             "Enable per-shard parallel splits on clusters; false forces a single split and never uses the internal shardIds API")
     public ArangoConfig setShardParallelismEnabled(boolean shardParallelismEnabled) {
         this.shardParallelismEnabled = shardParallelismEnabled;
+        return this;
+    }
+
+    public boolean isAggregationPushdownEnabled() {
+        return aggregationPushdownEnabled;
+    }
+
+    @Config("arangodb.aggregation-pushdown-enabled")
+    @ConfigDescription(
+            "Push COUNT/SUM/MIN/MAX/AVG and GROUP BY into AQL on a single split; false aggregates entirely in Trino")
+    public ArangoConfig setAggregationPushdownEnabled(boolean aggregationPushdownEnabled) {
+        this.aggregationPushdownEnabled = aggregationPushdownEnabled;
         return this;
     }
 }

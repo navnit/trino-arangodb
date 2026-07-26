@@ -49,6 +49,14 @@ public class ArangoSplitManager implements ConnectorSplitManager {
     private static final ArangoSplit SINGLE = new ArangoSplit(List.of());
 
     private List<ArangoSplit> splitsFor(ArangoTableHandle handle) {
+        // Aggregated handles are always exactly one split: Trino replaces the aggregation node and
+        // treats this output as FINAL, so N shard-splits would emit N duplicate final rows (master
+        // spec §6.4). Checked before shard discovery so the capability probe's round trip is never
+        // paid for a query that cannot fan out. ArangoDB still parallelizes the single AQL across
+        // its own shards internally, so only Trino-worker-level parallelism is traded away.
+        if (handle.aggregation().isPresent()) {
+            return List.of(SINGLE);
+        }
         if (!config.isShardParallelismEnabled()) {
             return List.of(SINGLE);
         }

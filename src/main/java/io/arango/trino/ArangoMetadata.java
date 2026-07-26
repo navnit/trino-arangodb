@@ -14,6 +14,9 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.util.concurrent.UncheckedExecutionException;
 import com.google.inject.Inject;
+import io.arango.trino.aggregation.AggregatePushdown;
+import io.arango.trino.aggregation.AggregateSpec;
+import io.arango.trino.aggregation.ArangoAggregation;
 import io.arango.trino.client.ArangoClient;
 import io.arango.trino.client.ArangoClient.CollectionInfo;
 import io.arango.trino.handle.ArangoColumnHandle;
@@ -106,7 +109,8 @@ public class ArangoMetadata implements ConnectorMetadata {
                                             c.name(),
                                             c.isEdge(),
                                             TupleDomain.all(),
-                                            OptionalLong.empty()))
+                                            OptionalLong.empty(),
+                                            Optional.empty()))
                     .orElse(null); // null => table not found (Trino throws)
         } catch (ArangoDBException e) {
             if (isDatabaseNotFound(e)) {
@@ -190,6 +194,12 @@ public class ArangoMetadata implements ConnectorMetadata {
     public Optional<ConstraintApplicationResult<ConnectorTableHandle>> applyFilter(
             ConnectorSession session, ConnectorTableHandle table, Constraint constraint) {
         ArangoTableHandle handle = (ArangoTableHandle) table;
+        // A filter arriving after aggregation is a HAVING, but AqlBuilder renders pushed filters
+        // BEFORE the COLLECT -- pushing it would silently evaluate it as a WHERE over pre-grouped
+        // rows.
+        if (handle.aggregation().isPresent()) {
+            return Optional.empty();
+        }
         TupleDomain<ColumnHandle> newDomain = constraint.getSummary();
         if (newDomain.isNone() || newDomain.isAll()) {
             return Optional.empty();
@@ -302,6 +312,46 @@ public class ArangoMetadata implements ConnectorMetadata {
     }
 
     @Override
+    public Optional<AggregationApplicationResult<ConnectorTableHandle>> applyAggregation(
+            ConnectorSession session,
+            ConnectorTableHandle table,
+            List<AggregateFunction> aggregates,
+            Map<String, ColumnHandle> assignments,
+            List<List<ColumnHandle>> groupingSets) {
+        ArangoTableHandle handle = (ArangoTableHandle) table;
+        Optional<ArangoAggregation> planned =
+                AggregatePushdown.plan(config, handle, aggregates, assignments, groupingSets);
+        if (planned.isEmpty()) {
+            return Optional.empty();
+        }
+
+        ImmutableList.Builder<ConnectorExpression> projections = ImmutableList.builder();
+        ImmutableList.Builder<Assignment> newAssignments = ImmutableList.builder();
+        for (AggregateSpec spec : planned.get().aggregates()) {
+            // The output type is the aggregate's, never the inferred column's: count over a
+            // VARCHAR column outputs BIGINT. ArangoPageSource then materializes it like any
+            // other column, which is why the read path needs no change for M5.
+            ArangoColumnHandle output =
+                    new ArangoColumnHandle(
+                            spec.outputName(),
+                            spec.outputType(),
+                            false,
+                            List.of(spec.outputName()));
+            projections.add(new Variable(output.name(), output.type()));
+            newAssignments.add(new Assignment(output.name(), output, output.type()));
+        }
+
+        return Optional.of(
+                new AggregationApplicationResult<>(
+                        handle.withAggregation(planned.get()),
+                        projections.build(),
+                        newAssignments.build(),
+                        // Grouping columns keep their own handles, so nothing needs remapping.
+                        ImmutableMap.of(),
+                        false));
+    }
+
+    @Override
     public Optional<LimitApplicationResult<ConnectorTableHandle>> applyLimit(
             ConnectorSession session, ConnectorTableHandle table, long limit) {
         ArangoTableHandle handle = (ArangoTableHandle) table;
@@ -313,7 +363,10 @@ public class ArangoMetadata implements ConnectorMetadata {
         // so
         // Trino must apply the final LIMIT -> report false. Disabled => always one split => exact
         // => true.
-        boolean limitGuaranteed = !config.isShardParallelismEnabled();
+        // An aggregated handle is likewise always one split (the split manager short-circuits on
+        // it), so a LIMIT rendered after the COLLECT is the final limit regardless of the flag.
+        boolean limitGuaranteed =
+                !config.isShardParallelismEnabled() || handle.aggregation().isPresent();
         return Optional.of(
                 new LimitApplicationResult<>(handle.withLimit(limit), limitGuaranteed, false));
     }
@@ -324,6 +377,14 @@ public class ArangoMetadata implements ConnectorMetadata {
             ConnectorTableHandle table,
             List<ConnectorExpression> projections,
             Map<String, ColumnHandle> assignments) {
+        // Explicit rather than incidental: today the !progress exit below happens to catch this,
+        // because every aggregate output and grouping key is scalar so no FieldDereference can
+        // resolve against one. That is safety by coincidence -- a later widening of the
+        // grouping-key
+        // matrix to structured types would turn it into a dereference pushed at a COLLECT variable.
+        if (((ArangoTableHandle) table).aggregation().isPresent()) {
+            return Optional.empty();
+        }
         ImmutableList.Builder<ConnectorExpression> newProjections = ImmutableList.builder();
         ImmutableList.Builder<Assignment> newAssignments = ImmutableList.builder();
         Map<String, ArangoColumnHandle> deduped = new LinkedHashMap<>();

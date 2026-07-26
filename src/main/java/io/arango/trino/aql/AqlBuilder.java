@@ -1,6 +1,9 @@
 package io.arango.trino.aql;
 
 import io.airlift.slice.Slice;
+import io.arango.trino.aggregation.AggregateSpec;
+import io.arango.trino.aggregation.ArangoAggregation;
+import io.arango.trino.aggregation.ColumnGuard;
 import io.arango.trino.handle.ArangoColumnHandle;
 import io.arango.trino.handle.ArangoTableHandle;
 import io.trino.spi.connector.ColumnHandle;
@@ -8,7 +11,7 @@ import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.ValueSet;
 import io.trino.spi.type.DoubleType;
-
+import io.trino.spi.type.Type;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -19,26 +22,182 @@ public class AqlBuilder {
 
     public AqlQuery buildScan(ArangoTableHandle table, List<ArangoColumnHandle> columns) {
         Map<String, Object> bindVars = new LinkedHashMap<>();
-        bindVars.put("@col", table.table());
         int[] counter = {0};
-
-        StringBuilder aql = new StringBuilder("FOR d IN @@col");
-
-        List<String> filters = new ArrayList<>();
-        table.constraint().getDomains().ifPresent(domains -> {
-            for (Map.Entry<ColumnHandle, Domain> entry : domains.entrySet()) {
-                ArangoColumnHandle column = (ArangoColumnHandle) entry.getKey();
-                filters.add("(" + renderDomain(column, entry.getValue(), bindVars, counter) + ")");
-            }
-        });
-        if (!filters.isEmpty()) {
-            aql.append(" FILTER ").append(String.join(" AND ", filters));
-        }
+        StringBuilder aql = scanPrefix(table, bindVars, counter);
 
         table.limit().ifPresent(limit -> aql.append(" LIMIT ").append(limit));
 
         aql.append(" RETURN ").append(buildReturnClause(columns));
         return new AqlQuery(aql.toString(), bindVars);
+    }
+
+    // Shared by buildScan and buildAggregate: "FOR d IN @@col" plus the pushed FILTER, if any.
+    // Both paths filter identically -- the aggregated path only differs after this point, where
+    // it emits COLLECT/AGGREGATE instead of projecting documents.
+    private StringBuilder scanPrefix(
+            ArangoTableHandle table, Map<String, Object> bindVars, int[] counter) {
+        bindVars.put("@col", table.table());
+        StringBuilder aql = new StringBuilder("FOR d IN @@col");
+
+        List<String> filters = new ArrayList<>();
+        table.constraint()
+                .getDomains()
+                .ifPresent(
+                        domains -> {
+                            for (Map.Entry<ColumnHandle, Domain> entry : domains.entrySet()) {
+                                ArangoColumnHandle column = (ArangoColumnHandle) entry.getKey();
+                                filters.add(
+                                        "("
+                                                + renderDomain(
+                                                        column, entry.getValue(), bindVars, counter)
+                                                + ")");
+                            }
+                        });
+        if (!filters.isEmpty()) {
+            aql.append(" FILTER ").append(String.join(" AND ", filters));
+        }
+        return aql;
+    }
+
+    /**
+     * Renders a pushed aggregation as {@code FOR -> FILTER -> COLLECT/AGGREGATE -> LIMIT ->
+     * RETURN}. Every aggregate input and grouping key goes through {@link ColumnGuard}, so the
+     * query computes over exactly the values {@code ValueMaterializer} would have emitted.
+     *
+     * <p>The AGGREGATE terms come from the handle's descriptor, not from {@code columns}: the sum
+     * companion counts are never requested columns, and Trino may prune aggregate outputs. The
+     * RETURN object is built from {@code columns} instead, in their order, because {@code
+     * ArangoPageSource} looks each value up by the column's name.
+     */
+    public AqlQuery buildAggregate(ArangoTableHandle table, List<ArangoColumnHandle> columns) {
+        ArangoAggregation aggregation =
+                table.aggregation()
+                        .orElseThrow(
+                                () ->
+                                        new IllegalArgumentException(
+                                                "buildAggregate called on a non-aggregated handle"));
+        Map<String, Object> bindVars = new LinkedHashMap<>();
+        int[] counter = {0};
+        StringBuilder aql = scanPrefix(table, bindVars, counter);
+
+        // Synthetic variable names (g0..., a0...) so a column name that is not a legal AQL
+        // identifier -- e.g. applyProjection's nested "address$city" -- never has to be one.
+        // The real names appear only as quoted object keys in RETURN.
+        Map<String, String> returnExpressions = new LinkedHashMap<>();
+        List<String> groupTerms = new ArrayList<>();
+        List<ArangoColumnHandle> groupingColumns = aggregation.groupingColumns();
+        for (int i = 0; i < groupingColumns.size(); i++) {
+            ArangoColumnHandle column = groupingColumns.get(i);
+            String variable = "g" + i;
+            groupTerms.add(
+                    variable
+                            + " = "
+                            + coerceOrThrow(
+                                    column.type(),
+                                    documentAccessor(column.path()),
+                                    ColumnGuard.Purpose.GROUPING_KEY));
+            returnExpressions.put(column.name(), variable);
+        }
+
+        List<String> aggregateTerms = new ArrayList<>();
+        List<AggregateSpec> specs = aggregation.aggregates();
+        for (int i = 0; i < specs.size(); i++) {
+            AggregateSpec spec = specs.get(i);
+            String variable = "a" + i;
+            String accessor =
+                    spec.input().map(column -> documentAccessor(column.path())).orElse(null);
+            Type inputType = spec.input().map(ArangoColumnHandle::type).orElse(null);
+            switch (spec.kind()) {
+                case COUNT_STAR -> {
+                    aggregateTerms.add(variable + " = LENGTH(1)");
+                    returnExpressions.put(spec.outputName(), variable);
+                }
+                case COUNT_COLUMN -> {
+                    aggregateTerms.add(variable + " = SUM(" + countTerm(inputType, accessor) + ")");
+                    // AQL SUM over zero rows is null; Trino's count of an empty table is 0.
+                    returnExpressions.put(
+                            spec.outputName(), "(" + variable + " == null ? 0 : " + variable + ")");
+                }
+                case SUM -> {
+                    String companion = variable + "n";
+                    aggregateTerms.add(
+                            variable
+                                    + " = SUM("
+                                    + coerceOrThrow(
+                                            inputType, accessor, ColumnGuard.Purpose.SUM_AVG)
+                                    + ")");
+                    aggregateTerms.add(
+                            companion + " = SUM(" + countTerm(inputType, accessor) + ")");
+                    // AQL SUM of an all-null group is 0 where SQL says NULL; the companion count
+                    // distinguishes them. `null > 0` is false, so an empty table -- where the
+                    // companion itself is null -- also yields NULL, as SQL requires.
+                    returnExpressions.put(
+                            spec.outputName(), "(" + companion + " > 0 ? " + variable + " : null)");
+                }
+                case AVG -> {
+                    aggregateTerms.add(
+                            variable
+                                    + " = AVERAGE("
+                                    + coerceOrThrow(
+                                            inputType, accessor, ColumnGuard.Purpose.SUM_AVG)
+                                    + ")");
+                    returnExpressions.put(spec.outputName(), variable);
+                }
+                case MIN, MAX -> {
+                    String function = spec.kind() == AggregateSpec.Kind.MIN ? "MIN" : "MAX";
+                    aggregateTerms.add(
+                            variable
+                                    + " = "
+                                    + function
+                                    + "("
+                                    + coerceOrThrow(
+                                            inputType, accessor, ColumnGuard.Purpose.MIN_MAX)
+                                    + ")");
+                    returnExpressions.put(spec.outputName(), variable);
+                }
+            }
+        }
+
+        aql.append(" COLLECT");
+        if (!groupTerms.isEmpty()) {
+            aql.append(' ').append(String.join(", ", groupTerms));
+        }
+        if (!aggregateTerms.isEmpty()) {
+            aql.append(" AGGREGATE ").append(String.join(", ", aggregateTerms));
+        }
+        table.limit().ifPresent(limit -> aql.append(" LIMIT ").append(limit));
+
+        StringBuilder returnClause = new StringBuilder("{");
+        for (int i = 0; i < columns.size(); i++) {
+            if (i > 0) {
+                returnClause.append(", ");
+            }
+            ArangoColumnHandle column = columns.get(i);
+            String expression = returnExpressions.get(column.name());
+            if (expression == null) {
+                throw new IllegalArgumentException(
+                        "column not produced by the pushed aggregation: " + column.name());
+            }
+            returnClause.append(quoteAqlString(column.name())).append(": ").append(expression);
+        }
+        aql.append(" RETURN ").append(returnClause.append("}"));
+        return new AqlQuery(aql.toString(), bindVars);
+    }
+
+    // The 0/1 term a count sums: AQL COUNT is an alias of LENGTH and would count nulls too.
+    private static String countTerm(Type type, String accessor) {
+        return "("
+                + ColumnGuard.predicate(type, accessor)
+                        .orElseThrow(() -> new IllegalArgumentException("unguardable count input"))
+                + ") ? 1 : 0";
+    }
+
+    private static String coerceOrThrow(Type type, String accessor, ColumnGuard.Purpose purpose) {
+        return ColumnGuard.coerce(type, accessor, purpose)
+                .orElseThrow(
+                        () ->
+                                new IllegalArgumentException(
+                                        "unguardable aggregate input or grouping key: " + type));
     }
 
     // Only reachable for domain shapes ArangoMetadata.applyFilter already classified as
@@ -48,17 +207,24 @@ public class AqlBuilder {
     //
     // DOUBLE promotion: a stored int64 in a DOUBLE column is read back rounded to double
     // (ValueMaterializer does n.doubleValue()), but ArangoDB compares int64-vs-double by
-    // exact mathematical value, not in double space -- so a bare `d.f <op> @v` diverges from the read
+    // exact mathematical value, not in double space -- so a bare `d.f <op> @v` diverges from the
+    // read
     // path for magnitudes > 2^53 (a stored 2^53+1 satisfies `> 2^53` in AQL yet reads back as 2^53,
-    // and `== 2^54` misses a stored 2^54-1 that reads back as 2^54). Promoting the operand into double
+    // and `== 2^54` misses a stored 2^54-1 that reads back as 2^54). Promoting the operand into
+    // double
     // space with `+ 0.0` makes AQL compare exactly the value the read path emits, keeping DOUBLE
     // pushdown fully enforced. The IS_NUMBER guard is required first because `+ 0.0` coerces
-    // non-numbers ("abc" + 0.0 == 0.0); AQL's AND short-circuits, so the guard protects the arithmetic.
-    // This promotion is DOUBLE-only on purpose: BIGINT reads exactly (longValue(), no rounding) against
-    // long binds, so bare exact comparison is what agrees there -- promoting BIGINT would create the
-    // mirror bug. Likewise the DOUBLE-equality IS_NUMBER guard must not leak onto BOOLEAN/VARCHAR/BIGINT,
+    // non-numbers ("abc" + 0.0 == 0.0); AQL's AND short-circuits, so the guard protects the
+    // arithmetic.
+    // This promotion is DOUBLE-only on purpose: BIGINT reads exactly (longValue(), no rounding)
+    // against
+    // long binds, so bare exact comparison is what agrees there -- promoting BIGINT would create
+    // the
+    // mirror bug. Likewise the DOUBLE-equality IS_NUMBER guard must not leak onto
+    // BOOLEAN/VARCHAR/BIGINT,
     // whose equality is already type-exact in AQL.
-    private static String renderDomain(ArangoColumnHandle column, Domain domain, Map<String, Object> bindVars, int[] counter) {
+    private static String renderDomain(
+            ArangoColumnHandle column, Domain domain, Map<String, Object> bindVars, int[] counter) {
         String accessor = documentAccessor(column.path());
         boolean isDouble = column.type().equals(DoubleType.DOUBLE);
         String cmp = isDouble ? "(" + accessor + " + 0.0)" : accessor;
@@ -79,15 +245,22 @@ public class AqlBuilder {
         // Numeric range (ArangoMetadata.isPushable only admits this for BIGINT/DOUBLE). AQL's <,>
         // use a total cross-type ordering (null<bool<number<string), so d.f>@v would also match
         // non-numbers; guard with IS_NUMBER. Both BIGINT and DOUBLE use a bare IS_NUMBER guard:
-        //   - We deliberately do NOT add an integrality guard for BIGINT. The obvious `d.f == FLOOR(d.f)`
-        //     is broken: AQL FLOOR() returns a double, and ArangoDB compares int64-vs-double by exact
-        //     value, so a stored int64 that isn't exactly double-representable (e.g. 2^53+1) fails the
-        //     guard and is dropped server-side even though the read path reads it exactly via longValue()
+        //   - We deliberately do NOT add an integrality guard for BIGINT. The obvious `d.f ==
+        // FLOOR(d.f)`
+        //     is broken: AQL FLOOR() returns a double, and ArangoDB compares int64-vs-double by
+        // exact
+        //     value, so a stored int64 that isn't exactly double-representable (e.g. 2^53+1) fails
+        // the
+        //     guard and is dropped server-side even though the read path reads it exactly via
+        // longValue()
         //     -- a silent false-miss (review finding C3). It is also unnecessary: BIGINT range is
-        //     prefilter-only (isPrefilterOnly), so the guard only needs to admit a SUPERSET -- a fractional
-        //     35.5 or an out-of-long-range integer passes IS_NUMBER, reads back NULL, and Trino's residual
+        //     prefilter-only (isPrefilterOnly), so the guard only needs to admit a SUPERSET -- a
+        // fractional
+        //     35.5 or an out-of-long-range integer passes IS_NUMBER, reads back NULL, and Trino's
+        // residual
         //     re-check excludes it.
-        //   - DOUBLE promotes its operands with `+ 0.0` (via cmp above) so the comparison itself agrees
+        //   - DOUBLE promotes its operands with `+ 0.0` (via cmp above) so the comparison itself
+        // agrees
         //     with the read path; the IS_NUMBER guard still excludes non-numbers.
         String guard = "IS_NUMBER(" + accessor + ")";
         List<String> rangeClauses = new ArrayList<>();
@@ -95,16 +268,32 @@ public class AqlBuilder {
             List<String> bounds = new ArrayList<>();
             if (!range.isLowUnbounded()) {
                 String op = range.isLowInclusive() ? " >= @" : " > @";
-                bounds.add(cmp + op + bindValue(bindVars, counter, toBindValue(range.getLowBoundedValue())));
+                bounds.add(
+                        cmp
+                                + op
+                                + bindValue(
+                                        bindVars,
+                                        counter,
+                                        toBindValue(range.getLowBoundedValue())));
             }
             if (!range.isHighUnbounded()) {
                 String op = range.isHighInclusive() ? " <= @" : " < @";
-                bounds.add(cmp + op + bindValue(bindVars, counter, toBindValue(range.getHighBoundedValue())));
+                bounds.add(
+                        cmp
+                                + op
+                                + bindValue(
+                                        bindVars,
+                                        counter,
+                                        toBindValue(range.getHighBoundedValue())));
             }
             // isPushable guarantees a real range (not all, not discrete), so bounds is non-empty.
-            rangeClauses.add(bounds.size() == 1 ? bounds.get(0) : "(" + String.join(" AND ", bounds) + ")");
+            rangeClauses.add(
+                    bounds.size() == 1 ? bounds.get(0) : "(" + String.join(" AND ", bounds) + ")");
         }
-        String ranges = rangeClauses.size() == 1 ? rangeClauses.get(0) : "(" + String.join(" OR ", rangeClauses) + ")";
+        String ranges =
+                rangeClauses.size() == 1
+                        ? rangeClauses.get(0)
+                        : "(" + String.join(" OR ", rangeClauses) + ")";
         return guard + " AND " + ranges;
     }
 
@@ -132,7 +321,9 @@ public class AqlBuilder {
                 sb.append(", ");
             }
             ArangoColumnHandle column = columns.get(i);
-            sb.append(quoteAqlString(column.name())).append(": ").append(documentAccessor(column.path()));
+            sb.append(quoteAqlString(column.name()))
+                    .append(": ")
+                    .append(documentAccessor(column.path()));
         }
         return sb.append("}").toString();
     }

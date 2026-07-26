@@ -36,7 +36,12 @@ public class ArangoPageSourceProvider implements ConnectorPageSourceProvider {
         ArangoSplit arangoSplit = (ArangoSplit) split;
         List<ArangoColumnHandle> cols =
                 columns.stream().map(ArangoColumnHandle.class::cast).toList();
-        AqlQuery q = aqlBuilder.buildScan(handle, cols);
+        // An aggregated handle renders COLLECT/AGGREGATE instead of a document projection; the
+        // split it arrives on is always the single one ArangoSplitManager emits for it.
+        AqlQuery q =
+                handle.aggregation().isPresent()
+                        ? aqlBuilder.buildAggregate(handle, cols)
+                        : aqlBuilder.buildScan(handle, cols);
         return new ArangoPageSource(
                 client.query(handle.schema(), q.aql(), q.bindVars(), arangoSplit.shardIds()),
                 cols,

@@ -7,8 +7,9 @@ ArangoDB **databases map to Trino schemas** and **collections map to tables**; s
 inferred by sampling documents. The connector is currently **read-only**, with equality/IN
 filter pushdown for all scalar types, guarded numeric range pushdown, and `LIMIT` pushdown.
 
-> **Status.** Milestones **M1**–**M4** are complete (**M4**: `ARRAY`/`ROW`/`DECIMAL` value
-> materialization). Writes (`INSERT`/`DELETE`) are out of scope so far — see
+> **Status.** Milestones **M1**–**M5** are complete (**M5**: aggregation pushdown —
+> `COUNT`/`SUM`/`MIN`/`MAX`/`AVG` and `GROUP BY` executed as an AQL `COLLECT` on a single
+> split). Writes (`INSERT`/`DELETE`) are out of scope for now — see
 > [Limitations](#limitations).
 
 ## Requirements
@@ -60,6 +61,7 @@ arangodb.password=
 | `arangodb.shards-per-split` | `1` | Target number of shards grouped into each split on cluster fan-out. See [Sharding / parallelism](#sharding--parallelism). |
 | `arangodb.max-splits` | `32` | Hard cap on the number of splits per collection scan. |
 | `arangodb.shard-parallelism-enabled` | `true` | Set to `false` to force single-split scans unconditionally and never invoke the internal `shardIds` option. |
+| `arangodb.aggregation-pushdown-enabled` | `true` | Set `false` to compute every aggregate in Trino instead of pushing it into AQL. See [Aggregation pushdown](#aggregation-pushdown). |
 
 ## Data model
 
@@ -163,6 +165,40 @@ knowing the server-side predicate admits exactly the values the reader would kee
 - **Strict mode disables pushdown entirely** (`type-coercion=strict`), so a type-mismatched row
   is never silently dropped server-side before the strict error can be raised.
 
+## Aggregation pushdown
+
+`COUNT`/`SUM`/`MIN`/`MAX`/`AVG` and single-grouping-set `GROUP BY` (including `SELECT DISTINCT`)
+are pushed into an AQL `COLLECT ... AGGREGATE`. An aggregated scan always runs as **exactly one
+split** — Trino treats a connector's aggregate output as final, so fanning out across shards would
+emit one duplicate row per split. ArangoDB still parallelizes that single query across its own
+shards internally.
+
+Every aggregate input and grouping key is wrapped in a type guard that reproduces the read path
+exactly, so the pushed query computes over precisely the values a non-pushed scan would have
+materialized. Values the reader would treat as `NULL` become AQL `null`, which AQL's aggregates
+ignore — matching SQL.
+
+| Aggregate | Pushed for | Computed in Trino instead |
+|---|---|---|
+| `count(*)` | always | — |
+| `count(col)` | `BOOLEAN`, `VARCHAR`, `BIGINT`, `DOUBLE` | structured / `DECIMAL` columns |
+| `min` / `max` | `BIGINT`, `DOUBLE` | `VARCHAR` — ArangoDB orders strings by the server's collation, Trino by codepoint |
+| `sum` / `avg` | `DOUBLE` | `BIGINT` — AQL accumulates sums in double, losing precision past 2⁵³ and turning Trino's `sum(bigint)` overflow error into a silent wrong answer |
+| `GROUP BY` key | `BOOLEAN`, `VARCHAR`, `BIGINT`, `DOUBLE` | structured / `DECIMAL` columns |
+
+Also declined: `DISTINCT` aggregates, `HAVING`, `GROUPING SETS`/`CUBE`/`ROLLUP`, ordered aggregates,
+aggregates with a `FILTER (WHERE ...)` clause, and any aggregate whose argument is not a plain
+column reference. Declining costs performance, never correctness — Trino computes those itself.
+
+Two interactions worth knowing:
+
+- **Strict coercion disables aggregation pushdown entirely**, for the same reason it disables filter
+  pushdown: a pushed aggregate would silently absorb the type mismatch strict mode exists to report.
+- **A `BIGINT` range predicate suppresses aggregation pushdown** on that query. Such a predicate is
+  a *prefilter* — enforced partly in AQL and partly by Trino's re-check — so an aggregate computed
+  server-side alone would count rows the re-check drops. `... WHERE double_col > 100 GROUP BY city`
+  pushes; `... WHERE bigint_col > 100 GROUP BY city` does not. Missed optimization, correct answer.
+
 ## Type coercion
 
 `arangodb.type-coercion` controls what happens when a stored value's runtime type does not match
@@ -190,6 +226,18 @@ pushdown safe — the pushed AQL and the reader agree on exactly which values qu
 - **Non-finite stored doubles** (`Infinity`/`NaN`) can be dropped by a fully-pushed `DOUBLE`
   predicate. This is unreachable via normal JSON ingestion (ArangoDB cannot represent them in
   JSON) and only affects documents written by a native-VelocyPack driver — an accepted limitation.
+
+- **A `DOUBLE` `sum`/`avg` that overflows reads back as `0`, not `Infinity`.** JSON and VelocyPack
+  cannot carry non-finite doubles, so an overflowing pushed sum is reported as `0`. This needs
+  summands within a few orders of magnitude of `DBL_MAX`; it shares a root cause with the
+  non-finite-doubles note above.
+- **`sum`/`avg` over `DOUBLE` may differ in the last bits** between the pushed and non-pushed plan,
+  because summation order differs. Trino's own multi-split `sum(double)` is already
+  order-dependent in the same way.
+- **`min`/`max` over a `DOUBLE` column holding both `-0.0` and `0.0`** may differ in the sign of the
+  returned zero. The two values are equal under SQL `=`.
+- **`SELECT DISTINCT col ... LIMIT n` does not push** — Trino plans it as a `DistinctLimitNode`,
+  which connector aggregation pushdown does not match.
 
 ## Development
 
