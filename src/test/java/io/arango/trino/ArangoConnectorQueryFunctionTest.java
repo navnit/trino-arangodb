@@ -147,12 +147,26 @@ class ArangoConnectorQueryFunctionTest {
 
     @Test
     void disabledFlagUnregistersTheFunction() {
+        // Positive control: run the identical query text against BOTH catalogs (same server,
+        // same database, differing only in arangodb.query-function-enabled) so the difference in
+        // outcome is pinned to the flag, not merely to an error-message string that could pass for
+        // an unrelated reason. Enabled must succeed, then disabled must fail with "not registered".
+        String queryText = "FOR d IN users RETURN {name: d.name}";
+
+        MaterializedResult enabled =
+                queryRunner.execute(
+                        "SELECT * FROM TABLE(arango.system.query(database => 'shop', query => '"
+                                + queryText
+                                + "'))");
+        assertThat(enabled.getRowCount()).isEqualTo(2);
+
         assertThatThrownBy(
                         () ->
                                 queryRunner.execute(
-                                        "SELECT * FROM TABLE(arango_off.system.query("
-                                                + "database => 'shop', "
-                                                + "query => 'FOR d IN users RETURN {name: d.name}'))"))
+                                        "SELECT * FROM TABLE(arango_off.system.query(database"
+                                                + " => 'shop', query => '"
+                                                + queryText
+                                                + "'))"))
                 .hasMessageContaining("not registered");
     }
 

@@ -22,7 +22,7 @@ public final class AqlReadOnlyGate {
     private AqlReadOnlyGate() {}
 
     public static Optional<Rejection> check(Map<String, Object> explainResponse) {
-        if (!(explainResponse.get("plan") instanceof Map<?, ?> plan)) {
+        if (explainResponse == null || !(explainResponse.get("plan") instanceof Map<?, ?> plan)) {
             return Optional.of(
                     new Rejection(Kind.NOT_READ_ONLY, "explain response carried no plan object"));
         }

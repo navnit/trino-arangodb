@@ -173,6 +173,121 @@ class AqlPassthroughAssumptionsTest {
         assertThat(userCount()).isEqualTo(before);
     }
 
+    // ---- §3.2 widened probe: the transaction-registration closure argument measured across
+    // DDL, nested AQL, and the users API, not just the single document-write API the original
+    // probe used. MEASURED RESULT: the closure property does NOT generalize to these three —
+    // DDL and the users API both SUCCEED even though the gate admits the call (spec §10,
+    // limitation recording this). Only the nested-AQL form is caught, and only because it
+    // re-enters the same declared-collections check the original probe measured. ----
+
+    @Test
+    void udfDdlCreateCollectionEscapesTheTransactionCheck() {
+        client.registerAqlFunctionForTest(
+                DB,
+                "EVIL::DDL",
+                "function (x) { try { require(\"@arangodb\").db._create(\"udf_probe_created\");"
+                        + " return \"CREATED\"; } catch (e) { return \"BLOCKED: \" + String(e)"
+                        + " + (e.errorMessage || \"\"); } }");
+        // the gate admits: a UDF call declares no collections at all
+        assertThat(verdict("RETURN EVIL::DDL(\"x\")")).isEmpty();
+
+        String result = String.valueOf(client.firstBatch(DB, "RETURN EVIL::DDL(\"x\")", 1).get(0));
+        // MEASURED: collection creation is DDL, not a write to a *declared* collection, so the
+        // transaction-registration rule that blocks document writes does not apply to it — this
+        // is the finding, not a hypothetical (spec §10).
+        assertThat(result).isEqualTo("CREATED");
+        assertThat(
+                        client.listCollections(DB).stream()
+                                .anyMatch(c -> c.name().equals("udf_probe_created")))
+                .isTrue();
+    }
+
+    @Test
+    void udfNestedAqlWriteIsStillBlocked() {
+        client.registerAqlFunctionForTest(
+                DB,
+                "EVIL::NESTEDAQL",
+                "function (x) { try {"
+                        + " require(\"@arangodb\").db._query(\"INSERT {x: 1} INTO users\");"
+                        + " return \"WROTE\"; } catch (e) { return \"BLOCKED: \" + String(e)"
+                        + " + (e.errorMessage || \"\"); } }");
+        assertThat(verdict("RETURN EVIL::NESTEDAQL(\"x\")")).isEmpty();
+
+        long before = userCount();
+        String result =
+                String.valueOf(client.firstBatch(DB, "RETURN EVIL::NESTEDAQL(\"x\")", 1).get(0));
+        // MEASURED: db._query() issued from inside the UDF re-enters the same
+        // declared-collections check the original probe measured, so this form is blocked.
+        assertThat(result).contains("unregistered collection");
+        assertThat(userCount()).isEqualTo(before);
+    }
+
+    @Test
+    void udfUsersApiEscapesTheTransactionCheck() {
+        client.registerAqlFunctionForTest(
+                DB,
+                "EVIL::USERS",
+                "function (x) { try {"
+                        + " require(\"@arangodb/users\").save(\"udf_probe_user\", \"pw\");"
+                        + " return \"CREATED\"; } catch (e) { return \"BLOCKED: \" + String(e)"
+                        + " + (e.errorMessage || \"\"); } }");
+        assertThat(verdict("RETURN EVIL::USERS(\"x\")")).isEmpty();
+
+        String result =
+                String.valueOf(client.firstBatch(DB, "RETURN EVIL::USERS(\"x\")", 1).get(0));
+        // MEASURED: the users API is server administration, not a collection write, so it is
+        // outside the transaction-registration mechanism entirely — this is the finding.
+        assertThat(result).isEqualTo("CREATED");
+        assertThat(client.userExistsForTest("udf_probe_user")).isTrue();
+    }
+
+    // MEASURED (follow-up to the two escapes above): the DDL and users-API escapes are exercised
+    // as root above, which leaves open whether they are bounded by the querying user's own
+    // grants. Under the connector's own deployment guidance — a read-only ArangoDB user — both
+    // forms are refused with a permission error, not a transaction-registration error: the
+    // mechanism differs from the one §3.2 originally credited, but the deployment control still
+    // holds for these two vectors.
+    @Test
+    void udfDdlAndUsersApiEscapesAreBoundedByTheQueryingUsersGrants() {
+        // Own UDFs and own target names, distinct from the two root-credential tests above: this
+        // keeps the "forbidden" assertion below decoupled from any duplicate-name/duplicate-user
+        // response the server might otherwise give if those tests happened to run first.
+        client.registerAqlFunctionForTest(
+                DB,
+                "EVIL::DDL_RO",
+                "function (x) { try {"
+                        + " require(\"@arangodb\").db._create(\"udf_probe_created_ro\");"
+                        + " return \"CREATED\"; } catch (e) { return \"BLOCKED: \" + String(e)"
+                        + " + (e.errorMessage || \"\"); } }");
+        client.registerAqlFunctionForTest(
+                DB,
+                "EVIL::USERS_RO",
+                "function (x) { try {"
+                        + " require(\"@arangodb/users\").save(\"udf_probe_user_ro\", \"pw\");"
+                        + " return \"CREATED\"; } catch (e) { return \"BLOCKED: \" + String(e)"
+                        + " + (e.errorMessage || \"\"); } }");
+        client.createReadOnlyUserForTest(DB, "ro_probe", "pw");
+        try (ArangoClient roClient =
+                new ArangoClient(
+                        new ArangoConfig()
+                                .setHosts(server.hostPort())
+                                .setUser("ro_probe")
+                                .setPassword("pw"))) {
+            assertThat(
+                            AqlReadOnlyGate.check(
+                                    roClient.explainPlan(DB, "RETURN EVIL::DDL_RO(\"x\")")))
+                    .isEmpty();
+            String ddlResult =
+                    String.valueOf(roClient.firstBatch(DB, "RETURN EVIL::DDL_RO(\"x\")", 1).get(0));
+            assertThat(ddlResult).contains("forbidden");
+
+            String usersResult =
+                    String.valueOf(
+                            roClient.firstBatch(DB, "RETURN EVIL::USERS_RO(\"x\")", 1).get(0));
+            assertThat(usersResult).contains("forbidden");
+        }
+    }
+
     // ---- §3.4: explain refuses a declared-but-unbound bind parameter ----
 
     @Test

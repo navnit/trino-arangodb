@@ -70,7 +70,7 @@ Measured against ArangoDB 3.12.4 (probe provenance in Appendix B), `POST /_api/e
 
 Two properties make this sound rather than heuristic:
 
-1. **It is closed by construction.** ArangoDB must know a query's write collections up front in order to take locks, so a query cannot mutate a collection it has not declared. There is no enumeration to keep in sync as AQL grows new constructs — the contrast with an AST/keyword denylist, where a missed construct silently opens the gate. §3.2 measures this mechanism directly rather than assuming it.
+1. **It is closed by construction — over AQL data-modification operations.** ArangoDB must know a query's write collections up front in order to take locks, so an AQL query cannot mutate a collection it has not declared. There is no enumeration to keep in sync as AQL grows new constructs — the contrast with an AST/keyword denylist, where a missed construct silently opens the gate. **This closure is scoped to the AQL layer; it is not closed over JavaScript UDF side effects** (measured, §3.2) — an explain plan cannot see what a UDF's V8 code does once invoked. §3.2 measures the AQL-level mechanism directly rather than assuming it, and measures where it does and does not extend.
 2. **It has no false positives from text.** A string literal containing `INSERT INTO` plans as `read` (row 5), which is exactly the failure mode §7 cites against keyword scanning.
 
 **Fail closed.** The rule is *admit only if every entry's `type` is exactly `read`*. An absent, null, or unrecognized `type` — ArangoDB's transaction API also knows `exclusive` — rejects. Strictness under novelty is the whole advantage of an allowlist, so it is pinned as its own unit test rather than left implied.
@@ -105,7 +105,25 @@ execute  RETURN APPLY("EVIL::WRITE", ["dyn2"])  users count 2 -> 2, plan.collect
 
 The server's own error — *"unregistered collection used in transaction: users [write]"* — **is** the lock-declaration mechanism the closure argument invokes, refusing a write to a collection the query never declared. This converts (1) from an assertion into a measurement, and it covers the dynamic-invocation forms that a node-type denylist would separately have to enumerate.
 
-Consequently the gate needs no UDF-specific rule. The residual exposure is a UDF that *reads* something the caller shouldn't see; that is bounded by the read-only DB user's grants, which remain the primary control. `AqlPassthroughAssumptionsTest` pins this case — if a future ArangoDB relaxed the transaction-registration rule, that test fails and the gate's soundness argument is revisited rather than silently lost.
+**The mechanism does not generalize past document writes to a declared collection.** A pre-merge review asked whether the same closure held for DDL, a nested AQL query issued from inside the UDF body, and the ArangoDB users-administration API — three write vectors reachable from the same UDF mechanism, none of them a document write to a collection the query declares. Measured against 3.12.4 (`AqlPassthroughAssumptionsTest`, root credentials):
+
+```
+DDL           EVIL::DDL body: require("@arangodb").db._create("udf_probe_created")
+              result = "CREATED"; udf_probe_created now exists in listCollections   -- SUCCEEDS
+
+nested AQL    EVIL::NESTEDAQL body: require("@arangodb").db._query("INSERT {x:1} INTO users")
+              result = "BLOCKED: ... unregistered collection used in transaction: users [write]"
+              users count unchanged                                                -- BLOCKED
+
+users API     EVIL::USERS body: require("@arangodb/users").save("udf_probe_user", "pw")
+              result = "CREATED"; udf_probe_user now exists                        -- SUCCEEDS
+```
+
+Only the nested-AQL form is caught, and only because it re-enters the very same declared-collections transaction check the original probe measured — it is a fresh AQL query, subject to the same rule as any other. **DDL (`db._create`) and the users-administration API are not collection writes inside an AQL transaction at all** — they are server/database administration calls with no collection to lock — so the transaction-registration mechanism simply does not apply to them, and both succeed under a root-equivalent connection.
+
+**This is bounded by the querying user's grants, not by the mechanism above.** Re-run as a user granted only `Permissions.RO` on the database (`AqlPassthroughAssumptionsTest.udfDdlAndUsersApiEscapesAreBoundedByTheQueryingUsersGrants`, mirroring the connector's own read-only-user deployment guidance), both the DDL and users-API forms are refused — `ArangoError 11: forbidden` — because ArangoDB's own authorization check inside the UDF's V8 context still applies the connecting user's permissions. So for these two vectors, the real control is not "the gate's closure argument," which is now known to be false for them; it is the pre-existing "defence in depth" read-only DB user, doing real work rather than acting as a backstop.
+
+Consequently the gate needs no UDF-specific rule — but not, as previously stated here, because the transaction-registration mechanism closes everything a UDF can do. It does not. `AqlPassthroughAssumptionsTest` pins all six outcomes (the original document-write blocked, DDL succeeds as root, nested-AQL write blocked as root, users-API succeeds as root, and both DDL and users-API blocked under a read-only grant) — if a future ArangoDB version changes any of them, that test fails and this section's argument must be revisited. See §10 for the resulting limitation.
 
 ### 3.3 System collections are *not* excluded by the gate
 
@@ -288,10 +306,12 @@ These errors surface during **analysis** rather than execution, which changes wh
 2. **The query executes twice** — once at planning for schema, once at execution (§4).
 3. **Schema is inferred from a prefix.** A field appearing only after row `k`, or a type that changes later in the result, is not in the derived schema; the former is absent, the latter degrades through `ValueMaterializer`'s existing coercion policy.
 4. **Non-deterministic queries** (`SORT RAND()`, concurrent writers) may derive a schema from rows the execution run does not produce. Same mechanism as (3).
-5. **`query()` bypasses Trino table- and column-level security** — inherited from the Mongo/JDBC precedent, and the reason the kill switch exists.
+5. **`query()` bypasses Trino table-, column-, *and schema*-level security** — inherited from the Mongo/JDBC precedent, and the reason the kill switch exists. `database` is a user-supplied argument, not one drawn from `listSchemaNames`, so a caller can name any database the connecting ArangoDB user can reach on the server, including ones the connector's own schema listing would never show them.
 6. **System-collection hiding is only partially enforceable** (§3.3). The plan-based `_`-prefix rejection catches the direct form; `DOCUMENT("_users/x")` resolves at runtime and is not in the plan. An ArangoSearch view linked to a system collection is the same bypass class: the view's own name need not be `_`-prefixed, so a view read admits (`AqlPassthroughAssumptionsTest.arangoSearchViewReadAdmits`) while surfacing data from the underlying system collection. Bounded by the read-only user's grants.
-7. **A UDF may read what the caller should not see** (§3.2). Writes are blocked by the server's transaction registration, but a registered UDF's *reads* are bounded only by the DB user's grants.
+7. **What a pre-registered UDF can do through `query()` (§3.2, widened).** `query()` gives an *invocation* path to any UDF already registered on the server — it cannot register one itself (registration is `POST /_api/aqlfunction`, a separate, unrelated API surface `query()` never calls). Measured effects of invoking a pre-registered UDF, root credentials: a document write to a collection the query doesn't declare is **blocked** by the server's transaction-registration check (the original §3.2 finding, still true); DDL (`db._create`) and the ArangoDB users-administration API (`require("@arangodb/users").save(...)`) are **not** collection writes inside a transaction and so are outside that check entirely — both **succeed**. Re-measured under a connection granted only `Permissions.RO` on the database (mirroring this connector's own read-only-user deployment guidance), both the DDL and users-API forms are refused with a permission error instead. So: a UDF's reads, DDL, and administrative actions are bounded by the *querying user's own grants*, not by the transaction-registration mechanism the original text credited for all UDF side effects — that mechanism only ever covered document writes. A deployment that (against guidance) connects `query()` as a privileged user has no gate-level backstop against a pre-registered UDF performing DDL or user administration.
 8. **A passthrough result is unbounded server-side.** `LIMIT` cannot be pushed into opaque AQL, and the execution cursor is deliberately non-streaming (matching the existing scan path's cursor behavior), so the server materializes the full passthrough result regardless of any Trino-side `LIMIT`.
+9. **Planning-time cost is unbounded in wall-clock terms.** Neither `explainPlan` nor `firstBatch` sets a `maxRuntime` or `memoryLimit` (§12 decision), so a pathological user query can run arbitrarily long, or force arbitrarily large server-side memory use via a blocking operator, synchronously on the coordinator during `analyze()` — before any row is returned to Trino.
+10. **A SmartGraph's internal collections could false-reject the gate (unmeasured, safe direction).** Enterprise SmartGraphs materialize internal collections named `_local_<name>`/`_from_<name>`/`_to_<name>`. `AqlReadOnlyGate` rejects any plan collection whose name starts with `_` (§3.3). If a coordinator's distributed plan for a SmartGraph traversal surfaces one of these internal names in `plan.collections[]`, the gate would reject a legitimate read-only traversal. This repo has no Enterprise-edition fixture, so it is unmeasured — but the failure direction is the safe one (over-rejection, not a soundness gap). `PassthroughClusterIT.namedGraphTraversalAdmitsOnCoordinator` covers only the community-edition named-graph case; it does not exercise SmartGraph's internal collection naming.
 
 ---
 
@@ -300,7 +320,7 @@ These errors surface during **analysis** rather than execution, which changes wh
 | Test | Kind | Covers |
 |---|---|---|
 | `AqlReadOnlyGateTest` | unit, pure | Verdict over explain fixtures: all-read admits; any write rejects; empty collections admits; **absent / null / `exclusive` `type` rejects** (fail closed, §3); `_`-prefixed name rejects (§3.3) |
-| `AqlPassthroughAssumptionsTest` | container | Pins every row of §3's table; the §3.2 UDF result (registered UDF admitted by the gate, write blocked by the server, collection count unchanged, plus `CALL()`/`APPLY()`); the §3.4 unbound-parameter rejection; and rows the current table lacks — an ArangoSearch view read (`FOR d IN view SEARCH ...`) and a `SHORTEST_PATH` form. The test that fails if an ArangoDB upgrade changes the invariant — analogue of `AqlSemanticsAssumptionsTest` |
+| `AqlPassthroughAssumptionsTest` | container | Pins every row of §3's table; the §3.2 UDF result (registered UDF admitted by the gate, document write blocked by the server, collection count unchanged, plus `CALL()`/`APPLY()`); the §3.2 widened probe — DDL and users-API UDF writes succeed as root, nested-AQL UDF write still blocked, and all three vectors bounded (`forbidden`) under a `Permissions.RO`-granted connection; the §3.4 unbound-parameter rejection; and rows the current table lacks — an ArangoSearch view read (`FOR d IN view SEARCH ...`) and a `SHORTEST_PATH` form. The test that fails if an ArangoDB upgrade changes the invariant — analogue of `AqlSemanticsAssumptionsTest` |
 | `ArangoQueryFunctionTest` | container | `analyze()`: every rule in §4.1 including the empty-key, mixed-batch, and case-collision cases; error paths in §9 |
 | `ArangoQueryHandleTest` | unit | Jackson round-trip of `ArangoQueryHandle` **and** of `QueryFunctionHandle` — both cross the coordinator/worker boundary |
 | `ArangoMetadataPassthroughTest` | unit | All four hooks decline (§6) |
@@ -322,6 +342,7 @@ These errors surface during **analysis** rather than execution, which changes wh
 8. **Explain is issued as a raw HTTP request, not via the driver's typed API** (§8.1) — the typed accessors exist only on a deprecated method.
 9. **The gate rejects `_`-prefixed collections** (§3.3) — hardening toward the connector's own hiding convention, explicitly not a guarantee.
 10. **`SchemaNotFoundException` for a missing database** (§9), departing from `ArangoMetadata`'s `TableNotFoundException` because the synthesized table name would read as nonsense.
+11. **No planning-time `maxRuntime`/`memoryLimit` bound is set** on `explainPlan` or `firstBatch`, though both `AqlQueryOptions.maxRuntime(Double)` and `.memoryLimit(Long)` exist in driver 7.13 (verified via `javap`, Appendix A). A bound is a config-shaped decision — what value is safe varies per deployment and per query, and this pre-merge review is a decision-recording pass, not a scope change to add a new property — so it is deferred here rather than designed; the deployment control remains the read-only ArangoDB user plus ArangoDB's own server-side query-limit configuration, which applies regardless of what this connector does. See limitation §10.9.
 
 ---
 
@@ -336,6 +357,7 @@ Also verified present: `TableFunctionApplicationResult(T, List<ColumnHandle>)`, 
 - `ArangoDatabase.explainAqlQuery(...) → AqlQueryExplainEntity` — the non-deprecated replacement. Its `ExecutionCollection` exposes **only** `add(String, Object)` / `get(String)`.
 - Together these are why §8.1 chooses a raw `POST /_api/explain` over either.
 - `AqlQueryOptions.stream(Boolean)` and `.batchSize(Integer)` — both present; §4 requires both.
+- `AqlQueryOptions.maxRuntime(Double)` and `.memoryLimit(Long)` — both present, unused by this design (§10 limitation 9, §12 decision 11).
 - `ArangoDatabase.parseQuery(String) → AqlParseEntity`; `AqlParseEntity.getCollections() → Collection<String>` ← names only, no access mode: the reason §3 rejects the parse route.
 
 `trino-main` 483 (source, 2026-07-26): `PlanPrinter.TableInfoSupplier.apply()` → `Metadata.getTableName` → `MetadataManager.getTableName` → `ConnectorMetadata.getTableName` → `getTableSchema` → `getTableMetadata`, on every `TableScanNode` including one from `RewriteTableFunctionToTableScan` — the basis for §5.2.
@@ -344,7 +366,7 @@ Also verified present: `TableFunctionApplicationResult(T, List<ColumnHandle>)`, 
 
 All measurements in §3 and §4 were taken 2026-07-26 against `arangodb/arangodb:3.12` (reported `3.12.4-3`), single-server, over the HTTP API — the same image the test suite pins in `TestingArangoServer` and `arangodb-cluster-compose.yml`. Fixtures: collection `users` (2 docs), edge collection `follows` (1 edge), named graph `social`.
 
-The §3.2 UDF probe was additionally run against `arangodb:3.11` (reported `3.11.14`) — the connector's minimum supported server under M3's version pin — with **identical results**, so the transaction-registration mechanism the gate's soundness rests on is measured across the supported range rather than at its top end only.
+The §3.2 UDF probe was additionally run against `arangodb:3.11` (reported `3.11.14`) — the connector's minimum supported server under M3's version pin — with **identical results**, so the transaction-registration mechanism the gate's soundness rests on is measured across the supported range rather than at its top end only. The §3.2 widened probe (DDL, nested AQL, users API, and the read-only-grant follow-up) was run only against 3.12.4, single-server, over the HTTP API, as root and separately as a `Permissions.RO`-granted user — not cross-checked against 3.11.14.
 
 §4.1's pathological-input rows are measured, not hypothesized: ArangoDB accepted and returned a document with an empty-string attribute key; `RETURN {Name:1, name:2}` returned both; and `FOR x IN [{a:1}, 42, "str", null] RETURN x` returned the mixed batch verbatim.
 

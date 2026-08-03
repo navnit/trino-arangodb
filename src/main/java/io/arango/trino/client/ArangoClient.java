@@ -2,6 +2,7 @@ package io.arango.trino.client;
 
 import com.arangodb.ArangoCursor;
 import com.arangodb.ArangoDB;
+import com.arangodb.ArangoDBException;
 import com.arangodb.Protocol;
 import com.arangodb.Request;
 import com.arangodb.Response;
@@ -9,6 +10,7 @@ import com.arangodb.entity.CollectionEntity;
 import com.arangodb.entity.CollectionPropertiesEntity;
 import com.arangodb.entity.CollectionType;
 import com.arangodb.entity.EdgeDefinition;
+import com.arangodb.entity.Permissions;
 import com.arangodb.entity.arangosearch.CollectionLink;
 import com.arangodb.model.AqlQueryOptions;
 import com.arangodb.model.CollectionCreateOptions;
@@ -233,6 +235,18 @@ public class ArangoClient implements AutoCloseable {
         arango.execute(req, Map.class);
     }
 
+    /**
+     * Test-only: creates (if absent) a server user and grants it read-only access to {@code db} —
+     * mirrors the deployment guidance's read-only user, for measuring whether a UDF side effect is
+     * bounded by grants rather than by the transaction-registration mechanism (spec §3.2).
+     */
+    public void createReadOnlyUserForTest(String db, String username, String password) {
+        if (arango.getUsers().stream().noneMatch(u -> u.getUser().equals(username))) {
+            arango.createUser(username, password);
+        }
+        arango.db(db).grantAccess(username, Permissions.RO);
+    }
+
     public void createGraphForTest(
             String db, String graph, String edgeCollection, String vertexCollection) {
         if (!arango.db(db).graph(graph).exists()) {
@@ -244,6 +258,19 @@ public class ArangoClient implements AutoCloseable {
                                             .collection(edgeCollection)
                                             .from(vertexCollection)
                                             .to(vertexCollection)));
+        }
+    }
+
+    /**
+     * Test-only: whether a server-level ArangoDB user exists (used to measure whether a UDF body
+     * can reach {@code require("@arangodb/users")}, spec §3.2 widened probe).
+     */
+    public boolean userExistsForTest(String username) {
+        try {
+            arango.getUser(username);
+            return true;
+        } catch (ArangoDBException e) {
+            return false;
         }
     }
 

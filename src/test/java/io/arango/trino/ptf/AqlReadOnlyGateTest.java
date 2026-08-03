@@ -70,6 +70,16 @@ class AqlReadOnlyGateTest {
         assertThat(AqlReadOnlyGate.check(Map.of("error", false))).isPresent();
     }
 
+    // A null explain body (ArangoClient.explainPlan's Response#getBody() cast is unchecked) must
+    // not NPE outside the error-classification path; it fails closed via the existing "no plan
+    // object" rejection instead.
+    @Test
+    void nullExplainResponseRejects() {
+        Optional<Rejection> verdict = AqlReadOnlyGate.check(null);
+        assertThat(verdict).isPresent();
+        assertThat(verdict.get().kind()).isEqualTo(Kind.NOT_READ_ONLY);
+    }
+
     @Test
     void missingCollectionsListRejects() {
         assertThat(AqlReadOnlyGate.check(Map.of("plan", Map.of("nodes", List.of())))).isPresent();
