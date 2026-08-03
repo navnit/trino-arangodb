@@ -8,18 +8,26 @@ import com.arangodb.Response;
 import com.arangodb.entity.CollectionEntity;
 import com.arangodb.entity.CollectionPropertiesEntity;
 import com.arangodb.entity.CollectionType;
+import com.arangodb.entity.EdgeDefinition;
+import com.arangodb.entity.arangosearch.CollectionLink;
 import com.arangodb.model.AqlQueryOptions;
 import com.arangodb.model.CollectionCreateOptions;
+import com.arangodb.model.arangosearch.ArangoSearchCreateOptions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.net.HostAndPort;
 import com.google.inject.Inject;
+import io.airlift.log.Logger;
 import io.arango.trino.ArangoConfig;
 import io.arango.trino.split.ShardingInfo;
 import jakarta.annotation.PreDestroy;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
 public class ArangoClient implements AutoCloseable {
+    private static final Logger log = Logger.get(ArangoClient.class);
+
     public record CollectionInfo(String name, boolean isEdge, boolean isSystem) {}
 
     private final ArangoDB arango;
@@ -113,6 +121,63 @@ public class ArangoClient implements AutoCloseable {
         return cursor.hasNext() ? cursor.next() : 0L;
     }
 
+    /**
+     * Raw POST /_api/explain (spec §8.1): the gate needs plan.collections[].type, which the
+     * driver's non-deprecated typed API does not expose. Full response body, uninterpreted —
+     * AqlReadOnlyGate owns all shape validation so it can fail closed.
+     */
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> explainPlan(String database, String aql) {
+        Request<Map<String, Object>> req =
+                new Request.Builder<Map<String, Object>>()
+                        .db(database)
+                        .method(Request.Method.POST)
+                        .path("/_api/explain")
+                        .body(Map.of("query", aql))
+                        .build();
+        return (Map<String, Object>) arango.execute(req, Map.class).getBody();
+    }
+
+    /**
+     * First batch of a streaming execution, at most {@code k} rows, cursor always disposed.
+     * stream(true) is load-bearing (spec §4): a non-stream cursor materializes the COMPLETE result
+     * server-side before serving the first batch, which is the cost this method exists to avoid.
+     * Object-typed so a non-object row arrives inspectable rather than as a driver deserialization
+     * failure. The result may contain nulls.
+     */
+    public List<Object> firstBatch(String database, String aql, int k) {
+        ArangoCursor<Object> cursor =
+                arango.db(database)
+                        .query(aql, Object.class, new AqlQueryOptions().batchSize(k).stream(true));
+        try {
+            List<Object> out = new ArrayList<>();
+            while (out.size() < k && cursor.hasNext()) {
+                out.add(cursor.next());
+            }
+            return Collections.unmodifiableList(out);
+        } finally {
+            // A stream cursor holds a server-side query snapshot open until disposed or TTL.
+            try {
+                cursor.close();
+            } catch (Exception e) {
+                // logged, not rethrown: disposal failure must not mask the rows already read
+                // (referencing e also keeps SpotBugs DE_MIGHT_IGNORE satisfied — this file is
+                // not grandfathered for it)
+                log.debug(e, "Failed to dispose first-batch cursor");
+            }
+        }
+    }
+
+    /**
+     * Execution-time passthrough cursor; Object-typed for the same reason as firstBatch.
+     * Deliberately NOT stream(true): the execution path consumes the whole result anyway, and this
+     * matches the existing scan path's cursor behavior (§4's streaming argument is about
+     * planning-time cost only).
+     */
+    public ArangoCursor<Object> queryPassthrough(String database, String aql) {
+        return arango.db(database).query(aql, Object.class);
+    }
+
     @SuppressWarnings("unchecked")
     public ArangoCursor<Map> query(
             String database, String aql, Map<String, Object> bindVars, List<String> shardIds) {
@@ -150,6 +215,41 @@ public class ArangoClient implements AutoCloseable {
 
     public void insertForTest(String db, String name, Map<String, Object> doc) {
         arango.db(db).collection(name).insertDocument(doc);
+    }
+
+    public void registerAqlFunctionForTest(String db, String name, String code) {
+        Request<Map<String, Object>> req =
+                new Request.Builder<Map<String, Object>>()
+                        .db(db)
+                        .method(Request.Method.POST)
+                        .path("/_api/aqlfunction")
+                        .body(Map.of("name", name, "code", code, "isDeterministic", false))
+                        .build();
+        arango.execute(req, Map.class);
+    }
+
+    public void createGraphForTest(
+            String db, String graph, String edgeCollection, String vertexCollection) {
+        if (!arango.db(db).graph(graph).exists()) {
+            arango.db(db)
+                    .createGraph(
+                            graph,
+                            List.of(
+                                    new EdgeDefinition()
+                                            .collection(edgeCollection)
+                                            .from(vertexCollection)
+                                            .to(vertexCollection)));
+        }
+    }
+
+    public void createArangoSearchViewForTest(String db, String view, String collection) {
+        if (!arango.db(db).view(view).exists()) {
+            arango.db(db)
+                    .createArangoSearch(
+                            view,
+                            new ArangoSearchCreateOptions()
+                                    .link(CollectionLink.on(collection).includeAllFields(true)));
+        }
     }
 
     @PreDestroy
