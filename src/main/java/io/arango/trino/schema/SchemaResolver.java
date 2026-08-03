@@ -76,7 +76,7 @@ public class SchemaResolver {
     // Resolves leftover UNKNOWN sentinels (fields/elements that were null in every sampled
     // document) to VARCHAR, recursing into RowType fields and ArrayType elements so UNKNOWN
     // never survives buried inside a nested structure.
-    private static Type resolveUnknown(Type type) {
+    public static Type resolveUnknown(Type type) {
         if (type.equals(UNKNOWN)) {
             return VARCHAR;
         }

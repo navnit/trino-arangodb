@@ -9,6 +9,7 @@ import com.fasterxml.jackson.databind.SerializerProvider;
 import io.airlift.json.JsonCodec;
 import io.airlift.json.JsonCodecFactory;
 import io.airlift.json.JsonMapperProvider;
+import io.arango.trino.ptf.ArangoQueryFunction;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.BigintType;
@@ -74,5 +75,14 @@ class ArangoQueryHandleTest {
     @Test
     void columnsAreDefensivelyCopied() {
         assertThat(sample().columns()).isUnmodifiable();
+    }
+
+    @Test
+    void queryFunctionHandleRoundTripsThroughJson() {
+        JsonCodec<ArangoQueryFunction.QueryFunctionHandle> codec =
+                codecFactory().jsonCodec(ArangoQueryFunction.QueryFunctionHandle.class);
+        ArangoQueryFunction.QueryFunctionHandle handle =
+                new ArangoQueryFunction.QueryFunctionHandle(sample());
+        assertThat(codec.fromJson(codec.toJson(handle))).isEqualTo(handle);
     }
 }
