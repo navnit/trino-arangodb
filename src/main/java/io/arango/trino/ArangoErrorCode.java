@@ -1,10 +1,10 @@
 package io.arango.trino;
 
+import static io.trino.spi.ErrorType.USER_ERROR;
+
 import io.trino.spi.ErrorCode;
 import io.trino.spi.ErrorCodeSupplier;
 import io.trino.spi.ErrorType;
-
-import static io.trino.spi.ErrorType.USER_ERROR;
 
 public enum ArangoErrorCode implements ErrorCodeSupplier {
     // 0x0100_0000 is this connector's private error-code base -- it only needs to be stable and

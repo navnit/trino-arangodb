@@ -1,5 +1,8 @@
 package io.arango.trino.schema;
 
+import static io.arango.trino.type.UnknownType.UNKNOWN;
+import static io.trino.spi.type.VarcharType.VARCHAR;
+
 import com.google.common.collect.ImmutableList;
 import io.arango.trino.ArangoConfig;
 import io.arango.trino.client.ArangoClient;
@@ -8,13 +11,9 @@ import io.arango.trino.type.TypeMapper;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
-
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-
-import static io.arango.trino.type.UnknownType.UNKNOWN;
-import static io.trino.spi.type.VarcharType.VARCHAR;
 
 public class SchemaResolver {
     public record ArangoColumn(String name, Type type, boolean hidden) {}
@@ -34,8 +33,12 @@ public class SchemaResolver {
     }
 
     public List<ArangoColumn> resolveColumns(String database, CollectionInfo collection) {
-        List<Map<String, Object>> docs = client.sampleDocuments(
-                database, collection.name(), config.getSampleSize(), config.isSampleRandom());
+        List<Map<String, Object>> docs =
+                client.sampleDocuments(
+                        database,
+                        collection.name(),
+                        config.getSampleSize(),
+                        config.isSampleRandom());
 
         // union of user fields, folding types via merge
         LinkedHashMap<String, Type> userFields = new LinkedHashMap<>();
@@ -46,7 +49,9 @@ public class SchemaResolver {
                     continue; // handled explicitly below
                 }
                 Type inferred = typeMapper.inferType(e.getValue());
-                userFields.merge(key, inferred,
+                userFields.merge(
+                        key,
+                        inferred,
                         (a, b) -> typeMapper.merge(a, b, config.getMixedTypeStrategy()));
             }
         }
@@ -54,8 +59,8 @@ public class SchemaResolver {
         ImmutableList.Builder<ArangoColumn> out = ImmutableList.builder();
         // any field seen only as null across the whole sample stays UNKNOWN (possibly nested
         // inside a RowType/ArrayType) -> default to VARCHAR, recursively
-        userFields.forEach((name, type) ->
-                out.add(new ArangoColumn(name, resolveUnknown(type), false)));
+        userFields.forEach(
+                (name, type) -> out.add(new ArangoColumn(name, resolveUnknown(type), false)));
         // system attributes: hidden varchar
         for (String sys : SYSTEM_ATTRS) {
             out.add(new ArangoColumn(sys, VARCHAR, true));

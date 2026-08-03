@@ -12,8 +12,11 @@ public class ArangoConnector implements Connector {
     private final ArangoPageSourceProvider pageSourceProvider;
 
     @Inject
-    public ArangoConnector(LifeCycleManager lifeCycleManager, ArangoMetadata metadata,
-            ArangoSplitManager splitManager, ArangoPageSourceProvider pageSourceProvider) {
+    public ArangoConnector(
+            LifeCycleManager lifeCycleManager,
+            ArangoMetadata metadata,
+            ArangoSplitManager splitManager,
+            ArangoPageSourceProvider pageSourceProvider) {
         this.lifeCycleManager = lifeCycleManager;
         this.metadata = metadata;
         this.splitManager = splitManager;
@@ -21,25 +24,31 @@ public class ArangoConnector implements Connector {
     }
 
     @Override
-    public ConnectorTransactionHandle beginTransaction(IsolationLevel isolationLevel,
-            boolean readOnly, boolean autoCommit) {
+    public ConnectorTransactionHandle beginTransaction(
+            IsolationLevel isolationLevel, boolean readOnly, boolean autoCommit) {
         return ArangoTransactionHandle.INSTANCE;
     }
 
     @Override
-    public ConnectorMetadata getMetadata(ConnectorSession session, ConnectorTransactionHandle transactionHandle) {
+    public ConnectorMetadata getMetadata(
+            ConnectorSession session, ConnectorTransactionHandle transactionHandle) {
         return metadata;
     }
 
     @Override
-    public ConnectorSplitManager getSplitManager() { return splitManager; }
+    public ConnectorSplitManager getSplitManager() {
+        return splitManager;
+    }
 
     @Override
-    public ConnectorPageSourceProvider getPageSourceProvider() { return pageSourceProvider; }
+    public ConnectorPageSourceProvider getPageSourceProvider() {
+        return pageSourceProvider;
+    }
 
     @Override
     public void shutdown() {
-        // stops Airlift-managed singletons, invoking @PreDestroy on ArangoClient (closes driver threads)
+        // stops Airlift-managed singletons, invoking @PreDestroy on ArangoClient (closes driver
+        // threads)
         lifeCycleManager.stop();
     }
 }

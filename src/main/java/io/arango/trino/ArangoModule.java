@@ -1,5 +1,7 @@
 package io.arango.trino;
 
+import static io.airlift.configuration.ConfigBinder.configBinder;
+
 import com.google.inject.Binder;
 import com.google.inject.Module;
 import com.google.inject.Scopes;
@@ -7,8 +9,6 @@ import io.arango.trino.aql.AqlBuilder;
 import io.arango.trino.client.ArangoClient;
 import io.arango.trino.schema.SchemaResolver;
 import io.arango.trino.type.TypeMapper;
-
-import static io.airlift.configuration.ConfigBinder.configBinder;
 
 public class ArangoModule implements Module {
     @Override
