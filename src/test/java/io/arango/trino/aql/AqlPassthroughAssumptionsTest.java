@@ -280,11 +280,17 @@ class AqlPassthroughAssumptionsTest {
             String ddlResult =
                     String.valueOf(roClient.firstBatch(DB, "RETURN EVIL::DDL_RO(\"x\")", 1).get(0));
             assertThat(ddlResult).contains("forbidden");
+            // the real invariant: nothing was created, not just that an error string was returned
+            assertThat(
+                            client.listCollections(DB).stream()
+                                    .anyMatch(c -> c.name().equals("udf_probe_created_ro")))
+                    .isFalse();
 
             String usersResult =
                     String.valueOf(
                             roClient.firstBatch(DB, "RETURN EVIL::USERS_RO(\"x\")", 1).get(0));
             assertThat(usersResult).contains("forbidden");
+            assertThat(client.userExistsForTest("udf_probe_user_ro")).isFalse();
         }
     }
 
