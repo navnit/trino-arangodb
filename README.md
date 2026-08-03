@@ -218,7 +218,11 @@ Read-only is enforced by inspecting the query's `EXPLAIN` plan and rejecting any
 purely `"read"` access, but this check is defense in depth, not the primary control — deploy the
 connector with a read-only ArangoDB user as the actual guarantee. The query also runs once at
 planning time (to sample rows and derive a schema) and once again at execution, so it must be
-side-effect-free and must return at least one row, or planning fails. Set
+side-effect-free and must return at least one row, or planning fails. The planning-time sample is
+`arangodb.schema.sample-size` rows (default 1000) — the same knob schema inference uses for
+ordinary table scans. `LIMIT` cannot be pushed into opaque AQL, and the execution cursor is
+non-streaming, so the server materializes the full passthrough result regardless of any Trino-side
+`LIMIT` (matching the existing scan path's cursor behavior). Set
 `arangodb.query-function-enabled=false` to remove the function entirely.
 
 ## Type coercion

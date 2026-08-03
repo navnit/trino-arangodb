@@ -217,6 +217,11 @@ public class ArangoClient implements AutoCloseable {
         arango.db(db).collection(name).insertDocument(doc);
     }
 
+    /**
+     * {@code name} must be {@code ::}-namespaced (e.g. {@code "test::fn"}) or the server rejects it
+     * with error 1580. Registers server-side JavaScript for test seeding only — never reachable
+     * from a user query path.
+     */
     public void registerAqlFunctionForTest(String db, String name, String code) {
         Request<Map<String, Object>> req =
                 new Request.Builder<Map<String, Object>>()

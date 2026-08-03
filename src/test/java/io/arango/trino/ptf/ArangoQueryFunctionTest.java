@@ -296,6 +296,28 @@ class ArangoQueryFunctionTest {
     }
 
     @Test
+    void executionTimeDivergentValueTypeReadsAsNullUnderLenientCoercion() throws Exception {
+        // derivation saw {a: 1}, {a: 2} (BIGINT); execution later yields {a: "str"} (§4.1 last
+        // row): under the default LENIENT coercion the divergent cell is NULL, not an error —
+        // ValueMaterializer's ordinary mismatch policy, exercised through the passthrough path
+        ArangoQueryHandle handle =
+                new ArangoQueryHandle(
+                        DB,
+                        "FOR x IN [{a: 1}, {a: 2}, {a: \"str\"}] RETURN x",
+                        List.of(
+                                new ArangoColumnHandle(
+                                        "a", BigintType.BIGINT, false, List.of("a"))));
+        ConnectorPageSource source = passthroughPageSource(handle);
+        try {
+            SourcePage page = source.getNextSourcePage();
+            assertThat(page.getPositionCount()).isEqualTo(3);
+            assertThat(page.getBlock(0).isNull(2)).isTrue();
+        } finally {
+            source.close();
+        }
+    }
+
+    @Test
     void executionTimeNonObjectRowIsAUserErrorWithTheSameGuidance() throws Exception {
         // derivation saw only objects; execution hits a later scalar (§4.1 last row / §9):
         // PassthroughCursor converts what would be a driver deserialization failure into the

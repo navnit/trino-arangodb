@@ -289,8 +289,9 @@ These errors surface during **analysis** rather than execution, which changes wh
 3. **Schema is inferred from a prefix.** A field appearing only after row `k`, or a type that changes later in the result, is not in the derived schema; the former is absent, the latter degrades through `ValueMaterializer`'s existing coercion policy.
 4. **Non-deterministic queries** (`SORT RAND()`, concurrent writers) may derive a schema from rows the execution run does not produce. Same mechanism as (3).
 5. **`query()` bypasses Trino table- and column-level security** — inherited from the Mongo/JDBC precedent, and the reason the kill switch exists.
-6. **System-collection hiding is only partially enforceable** (§3.3). The plan-based `_`-prefix rejection catches the direct form; `DOCUMENT("_users/x")` resolves at runtime and is not in the plan. Bounded by the read-only user's grants.
+6. **System-collection hiding is only partially enforceable** (§3.3). The plan-based `_`-prefix rejection catches the direct form; `DOCUMENT("_users/x")` resolves at runtime and is not in the plan. An ArangoSearch view linked to a system collection is the same bypass class: the view's own name need not be `_`-prefixed, so a view read admits (`AqlPassthroughAssumptionsTest.arangoSearchViewReadAdmits`) while surfacing data from the underlying system collection. Bounded by the read-only user's grants.
 7. **A UDF may read what the caller should not see** (§3.2). Writes are blocked by the server's transaction registration, but a registered UDF's *reads* are bounded only by the DB user's grants.
+8. **A passthrough result is unbounded server-side.** `LIMIT` cannot be pushed into opaque AQL, and the execution cursor is deliberately non-streaming (matching the existing scan path's cursor behavior), so the server materializes the full passthrough result regardless of any Trino-side `LIMIT`.
 
 ---
 
