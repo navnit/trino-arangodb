@@ -8,15 +8,20 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.airlift.slice.Slices;
 import io.arango.trino.ArangoConfig;
+import io.arango.trino.ArangoPageSourceProvider;
 import io.arango.trino.ArangoTransactionHandle;
 import io.arango.trino.TestingArangoServer;
+import io.arango.trino.aql.AqlBuilder;
 import io.arango.trino.client.ArangoClient;
 import io.arango.trino.handle.ArangoColumnHandle;
 import io.arango.trino.handle.ArangoQueryHandle;
+import io.arango.trino.handle.ArangoSplit;
 import io.arango.trino.ptf.ArangoQueryFunction.QueryFunctionHandle;
 import io.arango.trino.type.TypeMapper;
 import io.trino.spi.TrinoException;
+import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.SchemaNotFoundException;
+import io.trino.spi.connector.SourcePage;
 import io.trino.spi.function.table.AbstractConnectorTableFunction;
 import io.trino.spi.function.table.Descriptor;
 import io.trino.spi.function.table.ScalarArgument;
@@ -25,6 +30,7 @@ import io.trino.spi.type.BigintType;
 import io.trino.spi.type.VarcharType;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -254,5 +260,65 @@ class ArangoQueryFunctionTest {
                                 assertThat(e.getErrorCode())
                                         .isEqualTo(INVALID_FUNCTION_ARGUMENT.toErrorCode()))
                 .hasMessageContaining("syntax");
+    }
+
+    // ---- §8/§9: execution path — split-manager short-circuit and page-source dispatch ----
+
+    private ConnectorPageSource passthroughPageSource(ArangoQueryHandle handle) {
+        return new ArangoPageSourceProvider(client, new AqlBuilder(), new ArangoConfig())
+                .createPageSource(
+                        null,
+                        null,
+                        new ArangoSplit(List.of()),
+                        handle,
+                        Optional.empty(),
+                        List.copyOf(handle.columns()),
+                        null);
+    }
+
+    @Test
+    void executionRunsTheStoredQueryVerbatim() throws Exception {
+        ArangoQueryHandle handle =
+                new ArangoQueryHandle(
+                        DB,
+                        "FOR d IN users SORT d.age RETURN {age: d.age}",
+                        List.of(
+                                new ArangoColumnHandle(
+                                        "age", BigintType.BIGINT, false, List.of("age"))));
+        ConnectorPageSource source = passthroughPageSource(handle);
+        try {
+            SourcePage page = source.getNextSourcePage();
+            assertThat(page.getPositionCount()).isEqualTo(2);
+            assertThat(BigintType.BIGINT.getLong(page.getBlock(0), 0)).isEqualTo(36L);
+        } finally {
+            source.close();
+        }
+    }
+
+    @Test
+    void executionTimeNonObjectRowIsAUserErrorWithTheSameGuidance() throws Exception {
+        // derivation saw only objects; execution hits a later scalar (§4.1 last row / §9):
+        // PassthroughCursor converts what would be a driver deserialization failure into the
+        // same INVALID_FUNCTION_ARGUMENT message analyze() uses
+        ArangoQueryHandle handle =
+                new ArangoQueryHandle(
+                        DB,
+                        "FOR x IN [{a: 1}, {a: 2}, \"oops\"] RETURN x",
+                        List.of(
+                                new ArangoColumnHandle(
+                                        "a", BigintType.BIGINT, false, List.of("a"))));
+        ConnectorPageSource source = passthroughPageSource(handle);
+        try {
+            assertThatThrownBy(
+                            () -> {
+                                while (!source.isFinished()) {
+                                    source.getNextSourcePage();
+                                }
+                            })
+                    .isInstanceOf(TrinoException.class)
+                    .hasMessageContaining("RETURN {");
+        } finally {
+            source.close();
+        }
     }
 }
