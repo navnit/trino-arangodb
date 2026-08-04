@@ -407,7 +407,8 @@ public class ArangoMetadata implements ConnectorMetadata {
     /**
      * M6-A (spec 2026-08-04): row-count-only statistics. A guard chain — first matching rule wins:
      * kill switch, passthrough decline, aggregation rows (a global aggregate is exactly one row, a
-     * grouped one unknowable), then the counted path (Task 4 adds cache/limit/error handling).
+     * grouped one unknowable), then the TTL-cached collection count (with the pushed limit applied
+     * as a min only when it is exact, and a count failure degrading to unknown).
      */
     @Override
     public TableStatistics getTableStatistics(

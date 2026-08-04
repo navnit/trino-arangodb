@@ -3,6 +3,7 @@ package io.arango.trino;
 import static io.airlift.slice.Slices.utf8Slice;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import io.airlift.units.Duration;
 import io.arango.trino.aggregation.AggregateSpec;
 import io.arango.trino.aggregation.ArangoAggregation;
 import io.arango.trino.client.ArangoClient;
@@ -18,6 +19,7 @@ import io.trino.spi.type.VarcharType;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -229,14 +231,22 @@ class ArangoMetadataStatisticsTest {
     void countIsCachedWithinTtlAndRefreshedAfter() {
         CountingArangoClient client = new CountingArangoClient(java.util.Map.of("users", 42L));
         ManualTicker ticker = new ManualTicker();
-        ArangoMetadata metadata = new ArangoMetadata(client, null, new ArangoConfig(), ticker);
+        ArangoMetadata metadata =
+                new ArangoMetadata(
+                        client,
+                        null,
+                        new ArangoConfig().setStatisticsCacheTtl(new Duration(1, TimeUnit.MINUTES)),
+                        ticker);
         ArangoTableHandle handle = handleFor("users");
 
         metadata.getTableStatistics(null, handle);
         metadata.getTableStatistics(null, handle);
         assertThat(client.calls.get()).as("second call within TTL served from cache").isEqualTo(1);
 
-        ticker.advance(6, java.util.concurrent.TimeUnit.MINUTES); // default TTL is 5m
+        // Statistics TTL is 1m, schema TTL (default) is 5m. Advancing 2m expires the count
+        // cache only if wired correctly to getStatisticsCacheTtl(); a schema-TTL mis-wire would
+        // still serve from cache and fail the calls==2 assertion.
+        ticker.advance(2, TimeUnit.MINUTES);
         metadata.getTableStatistics(null, handle);
         assertThat(client.calls.get()).as("expired entry re-counts").isEqualTo(2);
     }
