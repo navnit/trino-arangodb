@@ -328,7 +328,7 @@ class ArangoMetadataStatisticsTest {
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `mvn test -Dtest=ArangoMetadataStatisticsTest`
-Expected: FAIL. Without an override, `ConnectorMetadata`'s default `getTableStatistics` returns `TableStatistics.empty()`, so the `empty()`-expecting tests pass vacuously, but `globalAggregationReportsExactlyOneRowWithoutClientCall`, `aggregationRowsWinOverLimit`, and `groupedAggregationWithPushedLimitReportsLimitWithoutClientCall` fail (`getValue()` on an unknown `Estimate` throws `IllegalStateException`). That is the red signal; note which tests failed.
+Expected: FAIL. Without an override, `ConnectorMetadata`'s default `getTableStatistics` returns `TableStatistics.empty()`, so the `empty()`-expecting tests pass vacuously, but `globalAggregationReportsExactlyOneRowWithoutClientCall`, `aggregationRowsWinOverLimit`, and `groupedAggregationWithPushedLimitReportsLimitWithoutClientCall` fail: `Estimate.getValue()` on an unknown estimate returns `NaN` (it does not throw), so AssertJ reports `NaN` ≠ `1.0`/`10.0`. That is the red signal; note which tests failed.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -412,7 +412,17 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 - [ ] **Step 1: Write the failing tests**
 
-Add to `ArangoMetadataStatisticsTest` a counting double, a ManualTicker copy (the one in `ArangoMetadataTest` is private to that class), and the counted-path tests:
+Add to `ArangoMetadataStatisticsTest`'s import block (Task 3's header does not have them; without the first, `extends ArangoClient` fails to compile — `ArangoClient` lives in `io.arango.trino.client`, a different package from this test):
+
+```java
+import static io.airlift.slice.Slices.utf8Slice;
+
+import io.arango.trino.client.ArangoClient;
+import io.trino.spi.connector.ColumnHandle;
+import io.trino.spi.predicate.Domain;
+```
+
+Then add a counting double, a ManualTicker copy (the one in `ArangoMetadataTest` is private to that class), and the counted-path tests:
 
 ```java
     /** Per-table counts + call counter; flaky mode throws once then succeeds. */
@@ -480,12 +490,11 @@ Add to `ArangoMetadataStatisticsTest` a counting double, a ManualTicker copy (th
                 handleFor("users")
                         .withConstraint(
                                 TupleDomain.withColumnDomains(
-                                        java.util.Map.of(
+                                        java.util.Map.<ColumnHandle, Domain>of(
                                                 CITY,
-                                                io.trino.spi.predicate.Domain.singleValue(
+                                                Domain.singleValue(
                                                         VarcharType.VARCHAR,
-                                                        io.airlift.slice.Slices.utf8Slice(
-                                                                "london")))));
+                                                        utf8Slice("london")))));
         assertThat(metadata.getTableStatistics(null, filtered).getRowCount().getValue())
                 .isEqualTo(42.0);
     }
@@ -586,10 +595,9 @@ Expected: FAIL — `limitMinAppliedOnlyWhenSingleSplit` (min not applied), `coun
 
 In `ArangoMetadata.java`:
 
-Add imports:
+Add import (only this one is new — `UncheckedExecutionException` is **already imported** at the top of the file for `resolve()`'s catch; re-adding it would trip Checkstyle's `RedundantImport` rule. As in Task 3: verify, add only what's missing):
 
 ```java
-import com.google.common.util.concurrent.UncheckedExecutionException;
 import io.airlift.log.Logger;
 ```
 
@@ -684,19 +692,19 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 Add to `ArangoConnectorQueryTest`:
 
+A `SHOW` statement is never a relation in Trino's grammar, so `SELECT ... FROM (SHOW STATS ...)` cannot parse — execute `SHOW STATS FOR (...)` directly and filter the summary row in Java. `SHOW STATS` emits one row per output column plus a summary row; with no column statistics the per-column rows are all-NULL, so assert on the summary row (`column_name`, field 0, is NULL) and read `row_count` at field index 4 (the 5th column of `SHOW STATS` output):
+
 ```java
     @Test
     void showStatsSurfacesRowCount() {
-        // M6 exit criterion made executable: "row-count stats surfaced". SHOW STATS emits one
-        // row per column plus a summary row; with no column statistics the per-column rows are
-        // all-NULL, so assert on the summary row (column_name IS NULL), spec §5.
-        MaterializedResult r =
-                queryRunner.execute(
-                        "SELECT row_count FROM (SHOW STATS FOR (SELECT * FROM users))"
-                                + " WHERE column_name IS NULL");
-        assertThat(r.getRowCount()).isEqualTo(1);
-        assertThat(((Number) r.getMaterializedRows().get(0).getField(0)).doubleValue())
-                .isEqualTo(2.0);
+        // M6 exit criterion made executable: "row-count stats surfaced" (spec §5).
+        MaterializedResult r = queryRunner.execute("SHOW STATS FOR (SELECT * FROM users)");
+        var summary =
+                r.getMaterializedRows().stream()
+                        .filter(row -> row.getField(0) == null) // summary row: column_name IS NULL
+                        .findFirst()
+                        .orElseThrow();
+        assertThat(((Number) summary.getField(4)).doubleValue()).isEqualTo(2.0);
     }
 
     @Test
@@ -704,30 +712,17 @@ Add to `ArangoConnectorQueryTest`:
         // The ArangoQueryHandle decline observed end-to-end: unknown row_count is SQL NULL.
         MaterializedResult r =
                 queryRunner.execute(
-                        "SELECT row_count FROM (SHOW STATS FOR ("
-                                + "SELECT * FROM TABLE(arango.system.query("
+                        "SHOW STATS FOR (SELECT * FROM TABLE(arango.system.query("
                                 + "database => 'shop',"
-                                + " query => 'FOR d IN users RETURN d'))))"
-                                + " WHERE column_name IS NULL");
-        assertThat(r.getRowCount()).isEqualTo(1);
-        assertThat(r.getMaterializedRows().get(0).getField(0)).isNull();
-    }
-```
-
-Note: `SHOW STATS FOR (...)` used as a subquery source is valid Trino syntax (`SHOW STATS` output is a relation). If the `SELECT ... FROM (SHOW STATS ...)` wrapping is rejected by the parser, fall back to executing `SHOW STATS FOR (SELECT * FROM users)` directly and filtering the summary row in Java:
-
-```java
-        MaterializedResult r = queryRunner.execute("SHOW STATS FOR (SELECT * FROM users)");
+                                + " query => 'FOR d IN users RETURN d')))");
         var summary =
                 r.getMaterializedRows().stream()
-                        .filter(row -> row.getField(0) == null) // column_name IS NULL
+                        .filter(row -> row.getField(0) == null)
                         .findFirst()
                         .orElseThrow();
-        // row_count is the 5th column of SHOW STATS output (index 4)
-        assertThat(((Number) summary.getField(4)).doubleValue()).isEqualTo(2.0);
+        assertThat(summary.getField(4)).isNull();
+    }
 ```
-
-Use whichever form compiles and runs; keep the summary-row assertion either way.
 
 - [ ] **Step 2: Run the tests**
 
