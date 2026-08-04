@@ -26,6 +26,8 @@ class ArangoConfigTest {
                         .setShardParallelismEnabled(true)
                         .setAggregationPushdownEnabled(true)
                         .setQueryFunctionEnabled(true)
+                        .setStatisticsEnabled(true)
+                        .setStatisticsCacheTtl(new Duration(5, MINUTES))
                         .setSchemaCacheTtl(new Duration(5, MINUTES)));
     }
 
@@ -45,6 +47,8 @@ class ArangoConfigTest {
                         .put("arangodb.shard-parallelism-enabled", "false")
                         .put("arangodb.aggregation-pushdown-enabled", "false")
                         .put("arangodb.query-function-enabled", "false")
+                        .put("arangodb.statistics-enabled", "false")
+                        .put("arangodb.statistics.cache-ttl", "10m")
                         .put("arangodb.schema.cache-ttl", "10m")
                         .buildOrThrow();
 
@@ -62,6 +66,8 @@ class ArangoConfigTest {
                         .setShardParallelismEnabled(false)
                         .setAggregationPushdownEnabled(false)
                         .setQueryFunctionEnabled(false)
+                        .setStatisticsEnabled(false)
+                        .setStatisticsCacheTtl(new Duration(10, MINUTES))
                         .setSchemaCacheTtl(new Duration(10, MINUTES));
 
         ConfigAssertions.assertFullMapping(props, expected);

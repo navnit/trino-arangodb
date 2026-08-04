@@ -37,6 +37,8 @@ public class ArangoConfig {
     private boolean shardParallelismEnabled = true;
     private boolean aggregationPushdownEnabled = true;
     private boolean queryFunctionEnabled = true;
+    private boolean statisticsEnabled = true;
+    private Duration statisticsCacheTtl = new Duration(5, MINUTES);
 
     @NotNull
     public String getHosts() {
@@ -191,6 +193,31 @@ public class ArangoConfig {
             "Register the arango.system.query passthrough table function; false removes it entirely")
     public ArangoConfig setQueryFunctionEnabled(boolean queryFunctionEnabled) {
         this.queryFunctionEnabled = queryFunctionEnabled;
+        return this;
+    }
+
+    public boolean isStatisticsEnabled() {
+        return statisticsEnabled;
+    }
+
+    @Config("arangodb.statistics-enabled")
+    @ConfigDescription(
+            "Expose row-count table statistics to the optimizer; false returns unknown statistics everywhere")
+    public ArangoConfig setStatisticsEnabled(boolean statisticsEnabled) {
+        this.statisticsEnabled = statisticsEnabled;
+        return this;
+    }
+
+    @NotNull
+    @MinDuration("0ms")
+    public Duration getStatisticsCacheTtl() {
+        return statisticsCacheTtl;
+    }
+
+    @Config("arangodb.statistics.cache-ttl")
+    @ConfigDescription("How long a collection row count is cached for planning")
+    public ArangoConfig setStatisticsCacheTtl(Duration statisticsCacheTtl) {
+        this.statisticsCacheTtl = statisticsCacheTtl;
         return this;
     }
 }
