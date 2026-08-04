@@ -34,6 +34,8 @@ import io.trino.spi.function.table.ConnectorTableFunctionHandle;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.predicate.ValueSet;
+import io.trino.spi.statistics.Estimate;
+import io.trino.spi.statistics.TableStatistics;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.BigintType;
 import io.trino.spi.type.BooleanType;
@@ -388,6 +390,43 @@ public class ArangoMetadata implements ConnectorMetadata {
                         // Grouping columns keep their own handles, so nothing needs remapping.
                         ImmutableMap.of(),
                         false));
+    }
+
+    /**
+     * M6-A (spec 2026-08-04): row-count-only statistics. A guard chain — first matching rule wins:
+     * kill switch, passthrough decline, aggregation rows (a global aggregate is exactly one row, a
+     * grouped one unknowable), then the counted path (Task 4 adds cache/limit/error handling).
+     */
+    @Override
+    public TableStatistics getTableStatistics(
+            ConnectorSession session, ConnectorTableHandle table) {
+        if (!config.isStatisticsEnabled()) {
+            return TableStatistics.empty();
+        }
+        // Same instanceof-decline-first pattern as the pushdown hooks: opaque user AQL has no
+        // collection to count.
+        if (table instanceof ArangoQueryHandle) {
+            return TableStatistics.empty();
+        }
+        ArangoTableHandle handle = (ArangoTableHandle) table;
+        if (handle.aggregation().isPresent()) {
+            // A global aggregate (empty groupingColumns) emits exactly one row — known exactly,
+            // matching the engine's own AggregationStatsRule.
+            if (handle.aggregation().get().groupingColumns().isEmpty()) {
+                return TableStatistics.builder().setRowCount(Estimate.of(1)).build();
+            }
+            // Grouped: cardinality is unknowable without NDV stats — unless a pushed limit caps
+            // it. applyLimit reports limitGuaranteed=true for aggregated handles (single split,
+            // LIMIT rendered after the COLLECT), so the cap is exact (spec §2).
+            if (handle.limit().isPresent()) {
+                return TableStatistics.builder()
+                        .setRowCount(Estimate.of(handle.limit().getAsLong()))
+                        .build();
+            }
+            return TableStatistics.empty();
+        }
+        long count = client.countDocuments(handle.schema(), handle.table());
+        return TableStatistics.builder().setRowCount(Estimate.of(count)).build();
     }
 
     @Override
