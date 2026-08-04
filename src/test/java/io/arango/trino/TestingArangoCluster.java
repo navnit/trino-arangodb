@@ -17,42 +17,85 @@ import org.testcontainers.containers.wait.strategy.Wait;
  * Boots the multi-node ArangoDB cluster (agency + one dbserver + coordinator) used by the
  * {@code @Tag("cluster")} ITs, via Testcontainers Compose.
  *
- * <p><b>What was measured.</b> Job wall-clock across CI runs is bimodal, with no middle: a
- * successful boot completes the *entire* job (checkout, JDK setup, image pull, Maven, cluster boot,
- * all tests) in 94-113s; a failed boot burns the *entire* {@code withStartupTimeout} window every
- * time (913s, 912.6s against the old 15-minute window) and never lands in between. That rules out
- * "the boot is slow" -- a slow-but-progressing boot would show intermediate durations. The boot
- * either completes in well under a minute or hangs indefinitely; the previous 8-then-15-minute
- * timeout escalation was chasing the wrong theory, since a longer window only makes a hang slower
- * to report and this class never retried, which is the one thing that actually helps. The root
- * cause of the hang itself (agency election that never converges? Docker networking on the runner?
- * CPU starvation?) is still unknown -- the per-service log consumers wired below exist to finally
- * capture the evidence needed to answer that.
+ * <p><b>What was measured, and the actual root cause.</b> Job wall-clock across CI runs was
+ * bimodal, with no middle: a successful boot completes the *entire* job (checkout, JDK setup, image
+ * pull, Maven, cluster boot, all tests) in 94-113s; a failed boot burned the *entire*
+ * startup-timeout window every time and never landed in between -- ruling out "the boot is slow" (a
+ * slow-but-progressing boot would show intermediate durations). The per-service log consumers wired
+ * below were added to capture the evidence needed to find the actual cause, and did: it is a
+ * genuine deadlock, not slowness, and the CI capture identified two distinct boot-order races (both
+ * now fixed in {@code arangodb-cluster-compose.yml}, see the comment block at the top of that file)
+ * -- an agency-not-ready race (the coordinator started 1.4s before the agency finished leader
+ * election, so both it and dbserver1 waited forever on agency state that was never written) and a
+ * phantom throwaway-instance registration race in the ArangoDB image's own {@code /entrypoint.sh}.
+ * Neither deadlock times out on its own, which is why no timeout value could ever have fixed this
+ * by itself.
  *
- * <p><b>The fix: retry with a FRESH container per attempt.</b> A deadlocked cluster formation does
- * not recover, so a retry that reused the same {@link ComposeContainer} would just hang again; each
- * attempt tears down its container on failure and the next attempt starts a new one. Per-attempt
- * budgets are tight because a real boot is fast: {@link #STARTUP_TIMEOUT} (4 minutes) and {@link
- * #READY_TIMEOUT} (90 seconds) are both a 4-8x margin over the measured successful case, not an
- * attempt to mask a genuine hang. Worst case is {@link #BOOT_ATTEMPTS} (3) x ~5.5 minutes =~ 16.5
- * minutes plus test time, comfortably inside the job's 30-minute ceiling -- versus the old
- * single-hang cost of 15 minutes for nothing.
+ * <p><b>Retry with a FRESH container per attempt stays as the safety net.</b> The compose-level fix
+ * addresses the races that were actually observed, but does not guarantee no boot ever hangs for
+ * some other reason, so the retry this class already had is kept: a deadlocked cluster formation
+ * does not recover, so a retry that reused the same {@link ComposeContainer} would just hang again;
+ * each attempt tears down its container on failure and the next attempt starts a new one.
+ * Per-attempt budgets are tight because a real boot is fast: {@link #STARTUP_TIMEOUT} (2 minutes)
+ * and {@link #READY_TIMEOUT} (90 seconds) are both a healthy margin over the measured successful
+ * case (boots complete in well under a minute), not an attempt to mask a genuine hang. Worst case
+ * is {@link #BOOT_ATTEMPTS} (3) x ~3.5 minutes =~ 10.5 minutes plus test time, comfortably inside
+ * the job's 30-minute ceiling.
+ *
+ * <p><b>Failing fast on a recognized deadlock.</b> Even with the race fixed, a bad run should not
+ * have to burn the full {@link #STARTUP_TIMEOUT} before retrying: dbserver1 repeating {@link
+ * #DEADLOCK_SIGNATURE} is an unambiguous deadlock tell (a healthy boot converges instead of
+ * repeating it -- measured at zero occurrences across multiple clean boots, see {@link
+ * #DEADLOCK_THRESHOLD}'s Javadoc), so {@link #DeadlockDetector} watches for it on dbserver1's log
+ * stream and interrupts the booting thread the moment the threshold is crossed, rather than waiting
+ * out the timeout. The matcher is a plain substring, deliberately not clever: if a future ArangoDB
+ * version changes the message, detection simply never triggers and this degrades to the ordinary
+ * timeout path, which is still correct.
  *
  * <p>Still true, unrelated to the above: one dbserver is enough because the shard-parallel ITs only
- * need a collection with more than one *shard*, and three shards live fine on a single PRIMARY -- a
- * second dbserver only doubled the boot footprint on the 2-vCPU runner. {@code
- * --cluster.system-replication-factor=1} on the coordinator is required for a single-dbserver
- * cluster: ArangoDB 3.12 creates its {@code _system} collections at replicationFactor 2 by default,
- * and with one dbserver that bootstrap step loops forever, so the coordinator never leaves
- * maintenance mode and {@code /_api/version} 503s until the wait times out.
+ * need a collection with more than one *shard*, and three shards live fine on a single PRIMARY.
+ * {@code --cluster.system-replication-factor=1} on the coordinator is required for a
+ * single-dbserver cluster: ArangoDB 3.12 creates its {@code _system} collections at
+ * replicationFactor 2 by default, and with one dbserver that bootstrap step loops forever, so the
+ * coordinator never leaves maintenance mode and {@code /_api/version} 503s until the wait times
+ * out.
  */
 public final class TestingArangoCluster implements AutoCloseable {
     private static final String COMPOSE_FILE = "src/test/resources/arangodb-cluster-compose.yml";
     private static final List<String> SERVICES = List.of("agency", "dbserver1", "coordinator");
     private static final int MAX_LOG_LINES_PER_SERVICE = 200;
 
+    /** The service whose log stream is watched for {@link #DEADLOCK_SIGNATURE}. */
+    private static final String DEADLOCK_WATCHED_SERVICE = "dbserver1";
+
+    /**
+     * Substring logged repeatedly by dbserver1 when it can't find its own registration in the
+     * agency -- the exact symptom captured from the deadlocked CI run this class was written to
+     * survive. A plain substring match on purpose: safe to go stale (a future ArangoDB message
+     * change just means detection never fires, degrading to the existing timeout), not worth making
+     * clever.
+     */
+    private static final String DEADLOCK_SIGNATURE = "Plan/DBServers in agency is no object";
+
+    /**
+     * How many times {@link #DEADLOCK_SIGNATURE} may appear before an attempt is aborted early.
+     * Measured, not guessed, as far as a healthy boot goes: across multiple clean boots against the
+     * fixed compose file, the line was never observed (count 0 every time) -- dbserver1 only
+     * reaches the code path that could log it after its agency handshake already succeeded, and a
+     * healthy boot's handshake succeeds immediately. It also proved *not* reproducible on demand
+     * outside the original race's exact timing -- every attempt to force a real ArangoDB cluster
+     * into logging it (unreachable agency, an agency that never elects, agency-then-real-dbserver
+     * with no coordinator) left dbserver1 blocked silently *before* that code path instead, never
+     * emitting the line at all; see the fast-abort verification in the fix's report for what was
+     * tried. So 8 (~10s of spinning, since the original CI capture showed dbserver1 repeating it
+     * roughly once every 1.2s) is chosen as comfortably above the only number that could be
+     * measured -- zero -- while still aborting a genuinely deadlocked attempt in seconds rather
+     * than minutes; it is not calibrated against an observed nonzero maximum, because none exists.
+     */
+    private static final int DEADLOCK_THRESHOLD = 8;
+
     private static final int BOOT_ATTEMPTS = 3;
-    private static final Duration STARTUP_TIMEOUT = Duration.ofMinutes(4);
+    private static final Duration STARTUP_TIMEOUT = Duration.ofMinutes(2);
     private static final Duration READY_TIMEOUT = Duration.ofSeconds(90);
 
     private final ComposeContainer compose;
@@ -101,12 +144,23 @@ public final class TestingArangoCluster implements AutoCloseable {
      * the consumer is wired before {@code start()} and there is no way to know in advance which
      * attempt will fail) and, on failure, stops the doomed container and rethrows wrapped in a
      * {@link BootAttemptException} carrying those logs for the caller to report.
+     *
+     * <p>{@link #DEADLOCK_WATCHED_SERVICE}'s log consumer also feeds a {@link DeadlockDetector};
+     * the moment it latches, this method's own thread (captured up front, since the detector fires
+     * from a Testcontainers log-streaming thread, not this one) is interrupted. Both {@link
+     * ComposeContainer#start()}'s internal wait and {@link #awaitClusterReady} already treat
+     * interruption as a failure (the latter explicitly, the former because the ducttape retry
+     * helper it uses under the hood surfaces an interrupted {@code Future#get} as its normal
+     * timeout exception), so this aborts the attempt within roughly one log line's worth of latency
+     * instead of waiting out {@link #STARTUP_TIMEOUT}.
      */
     private static ComposeContainer attemptBoot() {
         Map<String, CappedLog> logs = new HashMap<>();
         for (String service : SERVICES) {
             logs.put(service, new CappedLog());
         }
+        Thread bootThread = Thread.currentThread();
+        DeadlockDetector deadlockDetector = new DeadlockDetector();
         ComposeContainer candidate =
                 new ComposeContainer(new File(COMPOSE_FILE))
                         .withExposedService(
@@ -117,7 +171,16 @@ public final class TestingArangoCluster implements AutoCloseable {
                                         .withStartupTimeout(STARTUP_TIMEOUT));
         for (String service : SERVICES) {
             CappedLog log = logs.get(service);
-            candidate.withLogConsumer(service, frame -> log.append(frame.getUtf8String()));
+            boolean watched = service.equals(DEADLOCK_WATCHED_SERVICE);
+            candidate.withLogConsumer(
+                    service,
+                    frame -> {
+                        String text = frame.getUtf8String();
+                        log.append(text);
+                        if (watched && deadlockDetector.record(text)) {
+                            bootThread.interrupt();
+                        }
+                    });
         }
         try {
             // start() must be inside this try for stop() to cover the start()-timeout case, not
@@ -135,7 +198,13 @@ public final class TestingArangoCluster implements AutoCloseable {
             for (String service : SERVICES) {
                 snapshot.put(service, logs.get(service).snapshot());
             }
-            throw new BootAttemptException(e, snapshot);
+            throw new BootAttemptException(e, snapshot, deadlockDetector.triggered());
+        } finally {
+            // Clear a lingering interrupt so it can't spuriously fail the *next* attempt: this
+            // thread is reused across bootWithRetries' loop, and Thread#interrupt leaves the flag
+            // set until something consumes it. Harmless no-op when the attempt succeeded outright
+            // or failed for an unrelated reason.
+            Thread.interrupted();
         }
     }
 
@@ -148,12 +217,19 @@ public final class TestingArangoCluster implements AutoCloseable {
                 failure instanceof BootAttemptException bootAttemptException
                         ? bootAttemptException.serviceLogs()
                         : Map.of();
+        String reason =
+                failure instanceof BootAttemptException bootAttemptException
+                                && bootAttemptException.deadlockSignatureDetected()
+                        ? "deadlock signature detected"
+                        : "timed out / failed";
         System.err.println(
                 "=== boot attempt "
                         + attemptNumber
                         + "/"
                         + BOOT_ATTEMPTS
-                        + " failed: "
+                        + " failed ("
+                        + reason
+                        + "): "
                         + failure.getMessage()
                         + " ===");
         for (String service : SERVICES) {
@@ -175,19 +251,84 @@ public final class TestingArangoCluster implements AutoCloseable {
     }
 
     /**
-     * Wraps a boot-attempt failure together with the per-service logs captured up to that point.
+     * Wraps a boot-attempt failure together with the per-service logs captured up to that point,
+     * and whether the failure was an early, deliberate abort ({@link DeadlockDetector} latched)
+     * rather than an ordinary timeout -- surfaced so {@link #reportFailedAttempt} can label the
+     * dump with the right cause.
      */
     private static final class BootAttemptException extends RuntimeException {
         private final transient Map<String, List<String>> serviceLogs;
+        private final boolean deadlockSignatureDetected;
 
-        BootAttemptException(RuntimeException cause, Map<String, List<String>> serviceLogs) {
+        BootAttemptException(
+                RuntimeException cause,
+                Map<String, List<String>> serviceLogs,
+                boolean deadlockSignatureDetected) {
             super(cause.getMessage(), cause);
             this.serviceLogs = serviceLogs;
+            this.deadlockSignatureDetected = deadlockSignatureDetected;
         }
 
         Map<String, List<String>> serviceLogs() {
             return serviceLogs;
         }
+
+        boolean deadlockSignatureDetected() {
+            return deadlockSignatureDetected;
+        }
+    }
+
+    /**
+     * Latches once {@link #DEADLOCK_SIGNATURE} has appeared {@link #DEADLOCK_THRESHOLD} or more
+     * times across the frames fed to {@link #record}. Stateful and {@code synchronized} for the
+     * same reason as {@link CappedLog}: {@link #record} runs on Testcontainers' log-streaming
+     * threads, concurrently with each other and with whatever thread reads {@link #triggered()}.
+     * {@link #record} returns {@code true} exactly once -- on the call that crosses the threshold
+     * -- so callers can trigger a side effect (interrupting the boot thread) precisely once per
+     * attempt.
+     */
+    private static final class DeadlockDetector {
+        private int count;
+        private boolean triggered;
+
+        synchronized boolean record(String frameText) {
+            if (triggered) {
+                return false;
+            }
+            count += countMatchingLines(frameText, DEADLOCK_SIGNATURE);
+            if (!deadlockThresholdReached(count, DEADLOCK_THRESHOLD)) {
+                return false;
+            }
+            triggered = true;
+            return true;
+        }
+
+        synchronized boolean triggered() {
+            return triggered;
+        }
+    }
+
+    /**
+     * Pure line-splitting + substring count, extracted from {@link DeadlockDetector#record} so it
+     * is unit-testable without any concurrency or container involved. Mirrors {@link
+     * CappedLog#append}'s own line-splitting.
+     */
+    static int countMatchingLines(String frameText, String signature) {
+        int matches = 0;
+        for (String line : frameText.split("\\R")) {
+            if (line.contains(signature)) {
+                matches++;
+            }
+        }
+        return matches;
+    }
+
+    /**
+     * Pure threshold predicate, extracted from {@link DeadlockDetector#record} so the boundary
+     * condition is unit-testable in isolation.
+     */
+    static boolean deadlockThresholdReached(int count, int threshold) {
+        return count >= threshold;
     }
 
     /** A synchronized ring buffer of the last {@link #MAX_LOG_LINES_PER_SERVICE} log lines. */

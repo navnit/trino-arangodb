@@ -1,8 +1,10 @@
 package io.arango.trino;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -84,5 +86,30 @@ class TestingArangoClusterRetryTest {
 
     private static void fail() {
         throw new AssertionError("onFailure must not be invoked when the first attempt succeeds");
+    }
+
+    @Test
+    void countMatchingLinesCountsOnlyLinesContainingTheSignature() {
+        String frame =
+                "some other line\n"
+                        + "Plan/DBServers in agency is no object, but none. Agency not"
+                        + " initialized?\n"
+                        + "another unrelated line\n"
+                        + "Plan/DBServers in agency is no object, but none. Agency not"
+                        + " initialized?\n";
+        assertEquals(2, TestingArangoCluster.countMatchingLines(frame, "Plan/DBServers"));
+    }
+
+    @Test
+    void countMatchingLinesReturnsZeroWhenTheSignatureNeverAppears() {
+        String frame = "ArangoDB is ready for business\nusing endpoint tcp://0.0.0.0:8530\n";
+        assertEquals(0, TestingArangoCluster.countMatchingLines(frame, "Plan/DBServers"));
+    }
+
+    @Test
+    void deadlockThresholdReachedIsFalseBelowTheThresholdAndTrueAtOrAboveIt() {
+        assertFalse(TestingArangoCluster.deadlockThresholdReached(7, 8));
+        assertTrue(TestingArangoCluster.deadlockThresholdReached(8, 8));
+        assertTrue(TestingArangoCluster.deadlockThresholdReached(9, 8));
     }
 }
