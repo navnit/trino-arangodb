@@ -41,6 +41,21 @@
              in a separate, non-blocking job (see .github/workflows/ci.yml). -->
         <it.excludedGroups>cluster</it.excludedGroups>
         <it.groups></it.groups>
+        <!-- DistributedQueryRunner needs Trino's test JVM flags (see the surefire argLine
+             comment below for why each flag is mandatory on the JDK-25 baseline). Hoisted to a
+             shared property so surefire and failsafe stay identical: failsafe is a separate
+             plugin that does NOT inherit surefire's <argLine> (same reason the api.version
+             system property below is duplicated rather than inherited), and PassthroughClusterIT
+             is the first failsafe IT to boot a DistributedQueryRunner — without this, its
+             in-JVM Trino coordinator fails with NoClassDefFoundError on
+             io.trino.simd.BlockEncodingSimdSupport. -->
+        <trino.test.argLine>-Xmx2g -XX:+EnableDynamicAgentLoading -Dfile.encoding=UTF-8
+            --add-modules=jdk.incubator.vector
+            --sun-misc-unsafe-memory-access=allow
+            --add-opens=java.base/java.nio=ALL-UNNAMED
+            --add-opens=java.base/java.lang=ALL-UNNAMED
+            --add-opens=java.base/java.util=ALL-UNNAMED
+            --add-opens=java.base/sun.nio.ch=ALL-UNNAMED</trino.test.argLine>
     </properties>
 
     <dependencies>
@@ -264,13 +279,7 @@
                          engine fails to boot with NoClassDefFoundError), and the
                          sun-misc-unsafe-memory-access=allow flag (JDK 25 makes sun.misc.Unsafe
                          memory access throw by default, which Slice/Trino rely on). -->
-                    <argLine>-Xmx2g -XX:+EnableDynamicAgentLoading -Dfile.encoding=UTF-8
-                        --add-modules=jdk.incubator.vector
-                        --sun-misc-unsafe-memory-access=allow
-                        --add-opens=java.base/java.nio=ALL-UNNAMED
-                        --add-opens=java.base/java.lang=ALL-UNNAMED
-                        --add-opens=java.base/java.util=ALL-UNNAMED
-                        --add-opens=java.base/sun.nio.ch=ALL-UNNAMED</argLine>
+                    <argLine>${trino.test.argLine}</argLine>
                     <!-- Forced test-mechanics addition (Task 2): the docker-java client shaded
                          inside testcontainers 1.21.4 defaults to Docker Remote API 1.32
                          (org.testcontainers.shaded...DefaultDockerClientConfig$Builder), which any
@@ -305,6 +314,12 @@
                          excludes @Tag("cluster") ITs; the cluster-its profile includes only them. -->
                     <excludedGroups>${it.excludedGroups}</excludedGroups>
                     <groups>${it.groups}</groups>
+                    <!-- Same trino.test.argLine as surefire (see its <properties> comment):
+                         failsafe does NOT inherit surefire's <argLine>, and
+                         PassthroughClusterIT's @Tag("cluster") IT is the first failsafe test
+                         to boot a DistributedQueryRunner, which needs these JDK-25 flags to
+                         initialize io.trino.simd.BlockEncodingSimdSupport. -->
+                    <argLine>${trino.test.argLine}</argLine>
                     <!-- Docker Remote API workaround, same as surefire: failsafe is a
                          separate plugin and does NOT inherit surefire's config, so the
                          Testcontainers-shaded docker-java client needs api.version here too. -->

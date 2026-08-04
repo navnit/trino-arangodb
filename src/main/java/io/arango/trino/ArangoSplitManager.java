@@ -3,6 +3,7 @@ package io.arango.trino;
 import com.google.inject.Inject;
 import io.airlift.log.Logger;
 import io.arango.trino.client.ArangoClient;
+import io.arango.trino.handle.ArangoQueryHandle;
 import io.arango.trino.handle.ArangoSplit;
 import io.arango.trino.handle.ArangoTableHandle;
 import io.arango.trino.split.ShardEligibility;
@@ -43,6 +44,12 @@ public class ArangoSplitManager implements ConnectorSplitManager {
             ConnectorTableHandle table,
             Set<ColumnHandle> dynamicFilterColumns,
             Constraint constraint) {
+        // A passthrough is opaque AQL: there is no collection to enumerate shards for, no way
+        // to rewrite it per shard, and Trino treats its output as final — N splits would emit
+        // N duplicate result sets (spec §6). Checked before any discovery round trip.
+        if (table instanceof ArangoQueryHandle) {
+            return new FixedSplitSource(List.of(SINGLE));
+        }
         return new FixedSplitSource(splitsFor((ArangoTableHandle) table));
     }
 

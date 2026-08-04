@@ -36,6 +36,7 @@ public class ArangoConfig {
     private int maxSplits = 32;
     private boolean shardParallelismEnabled = true;
     private boolean aggregationPushdownEnabled = true;
+    private boolean queryFunctionEnabled = true;
 
     @NotNull
     public String getHosts() {
@@ -178,6 +179,18 @@ public class ArangoConfig {
             "Push COUNT/SUM/MIN/MAX/AVG and GROUP BY into AQL on a single split; false aggregates entirely in Trino")
     public ArangoConfig setAggregationPushdownEnabled(boolean aggregationPushdownEnabled) {
         this.aggregationPushdownEnabled = aggregationPushdownEnabled;
+        return this;
+    }
+
+    public boolean isQueryFunctionEnabled() {
+        return queryFunctionEnabled;
+    }
+
+    @Config("arangodb.query-function-enabled")
+    @ConfigDescription(
+            "Register the arango.system.query passthrough table function; false removes it entirely")
+    public ArangoConfig setQueryFunctionEnabled(boolean queryFunctionEnabled) {
+        this.queryFunctionEnabled = queryFunctionEnabled;
         return this;
     }
 }

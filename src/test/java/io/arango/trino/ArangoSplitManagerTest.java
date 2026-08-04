@@ -129,4 +129,39 @@ class ArangoSplitManagerTest {
         assertEquals(1, splits.size());
         assertTrue(splits.get(0).shardIds().isEmpty());
     }
+
+    @Test
+    void passthroughHandleShortCircuitsBeforeShardDiscovery() {
+        // a client whose discovery methods all blow up: the short-circuit must come first (§6)
+        ArangoClient noDiscovery =
+                new ArangoClient(new ArangoConfig()) {
+                    @Override
+                    public ShardingInfo getShardingInfo(String database, String collection) {
+                        throw new AssertionError("shard discovery must not run for a passthrough");
+                    }
+
+                    @Override
+                    public List<String> listShardIds(String database, String collection) {
+                        throw new AssertionError("shard discovery must not run for a passthrough");
+                    }
+                };
+        ArangoSplitManager mgr =
+                new ArangoSplitManager(
+                        noDiscovery, new ArangoConfig(), new ShardFanoutCapability(noDiscovery));
+        io.arango.trino.handle.ArangoQueryHandle handle =
+                new io.arango.trino.handle.ArangoQueryHandle(
+                        DB,
+                        "FOR d IN docs RETURN {v: d.v}",
+                        List.of(
+                                new io.arango.trino.handle.ArangoColumnHandle(
+                                        "v", BigintType.BIGINT, false, List.of("v"))));
+        ConnectorSplitSource source =
+                mgr.getSplits(null, null, handle, Set.of(), Constraint.alwaysTrue());
+        List<ArangoSplit> splits =
+                source.getNextBatch(1000, DynamicFilterSnapshot.EMPTY).getNow(null).stream()
+                        .map(ArangoSplit.class::cast)
+                        .toList();
+        assertEquals(1, splits.size());
+        assertTrue(splits.get(0).shardIds().isEmpty());
+    }
 }

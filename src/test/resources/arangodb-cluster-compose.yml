@@ -1,19 +1,80 @@
+# Two independent boot-order races were found (and fixed) here, not one:
+#
+# Race A -- agency-not-ready. Compose's default `depends_on: condition: service_started` only
+# waits for a container to *start*, not for the agency to actually be serving. Measured on CI,
+# the coordinator started 1.4s *before* the agency finished its (single-node, near-instant)
+# leader election, and both the coordinator and dbserver1 then deadlocked waiting on agency
+# state that was never written: the coordinator spun on "Waiting for DBservers to show up...",
+# dbserver1 spun on "Plan/DBServers in agency is no object", and neither timed out. Fixed below
+# by giving `agency` a healthcheck and making dbserver1/coordinator depend on it with
+# `condition: service_healthy`.
+#
+# Race B -- phantom throwaway-instance registration. Less obvious, and NOT visible in the CI
+# capture because Race A always fired first and masked it; found by reproducing locally after
+# fixing Race A alone, when the coordinator started hanging on a *different* signature ("Found 1
+# DBservers" followed by silence, then "ArangoDB didn't start correctly during init" ~2 minutes
+# later). What's confirmed: with Race A's healthcheck fix alone, the coordinator still hung this
+# way every time; adding `SKIP_DATABASE_INIT: "1"` on top produced 3/3 clean boots (~22s each) in
+# back-to-back local runs, and never once since. The image's own `/entrypoint.sh` explains why a
+# fresh data directory is implicated: on one, the entrypoint first runs a *throwaway* `arangod`
+# using the exact same `--cluster.*` flags as the real process (`--cluster.my-address`,
+# `--cluster.agency-endpoint`, etc.) with only `--server.endpoint` overridden to loopback -- so
+# that throwaway instance still registers itself with the agency under its real cluster address
+# (e.g. `dbserver1:8530`), even though its REST server is only reachable on `127.0.0.1`; ~10-20s
+# later the entrypoint SIGTERMs it and starts the real, externally-reachable arangod. The
+# resulting hypothesis -- a coordinator querying cluster membership during that window can find
+# the throwaway's registration, start bootstrapping against it, and hang when it vanishes -- is
+# inferred from that source reading, not independently verified against agency state; what's
+# actually verified is the before/after boot outcome above. `SKIP_DATABASE_INIT: "1"` sidesteps
+# the whole throwaway phase regardless of the precise mechanism: on a fresh volume it skips the
+# wrapper's init dance entirely (no root password or `/docker-entrypoint-initdb.d` scripts are
+# needed here -- `ARANGO_NO_AUTH=1` and no such scripts exist) and starts the real arangod
+# directly.
 services:
   agency:
     image: arangodb/arangodb:3.12
     environment:
       ARANGO_NO_AUTH: "1"
+      SKIP_DATABASE_INIT: "1"
     command: >
       arangod --server.authentication=false
       --server.endpoint=tcp://0.0.0.0:8531
       --agency.my-address=tcp://agency:8531 --agency.endpoint=tcp://agency:8531
       --agency.activate=true --agency.size=1 --agency.supervision=true
+    # Endpoint choice for the healthcheck, verified empirically (not assumed): `/_api/version`
+    # answers as soon as the general HTTP listener is up, which is measurably *before* the
+    # agency has a leader -- confirmed by polling both endpoints from inside a standalone agency
+    # container in a tight loop and observing `/_api/version` return 200 ~100-150ms before
+    # `/_api/agency/config` reports a non-empty `leaderId`. That ~100-150ms gap is small, but it
+    # corroborates the CI capture's 1.4s coordinator-vs-agency race margin being real and easy to
+    # lose. `/_api/agency/config` itself is also insufficient by itself: it returns 200 with
+    # `"leaderId":""` for (in one observed run) ~2,800 consecutive polls -- roughly 1.5s at the
+    # observed rate -- before the single-node election completes and `leaderId` is populated --
+    # the same class of false-positive "a socket is open" signal, just on a different endpoint.
+    # Only a 200 response whose body carries a non-empty `leaderId` coincides with the agency's
+    # own "rebuilt key-value stores - serving" log line, which is the actual readiness signal
+    # dbserver1/coordinator need. The matcher below tests for *any* non-empty `leaderId` value
+    # rather than ArangoDB's current `AGNT-` agent-id prefix specifically: `ComposeContainer`
+    # attaches log/output consumers only after `docker compose up` returns, so if this healthcheck
+    # never goes healthy, `up` fails with "dependency failed to start" and every service's log
+    # (including the agency's own) comes back empty in the failure dump -- a brittler matcher
+    # would turn a harmless future ID-format change into repeated ~2-minute CI failures with no
+    # diagnostics to act on.
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://127.0.0.1:8531/_api/agency/config | grep -q '\"leaderId\":\"[^\"]'",
+        ]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+      start_period: 2s
   # One dbserver is enough: the shard-parallel ITs need a collection with >1 *shard*
   # (numberOfShards=3, replicationFactor defaults to 1), and three shards live fine on a
-  # single PRIMARY. A second dbserver only doubled the boot footprint on GitHub's 2-vCPU
-  # runner, where the extra JVM tipped the cold cluster boot past the wait window and timed
-  # CI out. Per-shard `shardIds` scanning and the count-sum correctness proof are unaffected
-  # by how many servers host the shards.
+  # single PRIMARY. A second dbserver only doubled the boot footprint relative to a
+  # single-dbserver cluster. Per-shard `shardIds` scanning and the count-sum correctness proof
+  # are unaffected by how many servers host the shards.
   #
   # --cluster.system-replication-factor=1 on the coordinator is REQUIRED for a single-dbserver
   # cluster: ArangoDB 3.12 creates its _system collections at replicationFactor 2 by default,
@@ -25,16 +86,20 @@ services:
     image: arangodb/arangodb:3.12
     environment:
       ARANGO_NO_AUTH: "1"
+      SKIP_DATABASE_INIT: "1"
     command: >
       arangod --server.authentication=false
       --server.endpoint=tcp://0.0.0.0:8530
       --cluster.my-address=tcp://dbserver1:8530 --cluster.my-role=PRIMARY
       --cluster.agency-endpoint=tcp://agency:8531
-    depends_on: [agency]
+    depends_on:
+      agency:
+        condition: service_healthy
   coordinator:
     image: arangodb/arangodb:3.12
     environment:
       ARANGO_NO_AUTH: "1"
+      SKIP_DATABASE_INIT: "1"
     command: >
       arangod --server.authentication=false
       --server.endpoint=tcp://0.0.0.0:8529
@@ -42,4 +107,16 @@ services:
       --cluster.agency-endpoint=tcp://agency:8531
       --cluster.system-replication-factor=1
     ports: ["8529"]
-    depends_on: [agency, dbserver1]
+    depends_on:
+      agency:
+        condition: service_healthy
+      # dbserver1 has no healthcheck of its own, so this stays the plain `service_started`
+      # default -- deliberately, not an oversight: unlike the agency, dbserver1 has no
+      # analogous "answers HTTP but isn't really ready" trap for the coordinator to race
+      # past, because the coordinator's own "Waiting for DBservers to show up..." loop
+      # already polls until dbserver1 has actually registered. That loop only became a
+      # permanent hang under Race B (the phantom throwaway-instance registration, fixed
+      # above via `SKIP_DATABASE_INIT`); with Race B closed, a `service_started` dbserver1
+      # dependency is a real, terminating poll, not a race.
+      dbserver1:
+        condition: service_started

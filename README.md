@@ -7,9 +7,10 @@ ArangoDB **databases map to Trino schemas** and **collections map to tables**; s
 inferred by sampling documents. The connector is currently **read-only**, with equality/IN
 filter pushdown for all scalar types, guarded numeric range pushdown, and `LIMIT` pushdown.
 
-> **Status.** Milestones **M1**–**M5** are complete (**M5**: aggregation pushdown —
+> **Status.** Milestones **M1**–**M5** and **M6-B** are complete (**M5**: aggregation pushdown —
 > `COUNT`/`SUM`/`MIN`/`MAX`/`AVG` and `GROUP BY` executed as an AQL `COLLECT` on a single
-> split). Writes (`INSERT`/`DELETE`) are out of scope for now — see
+> split; **M6-B**: an `arango.system.query` table function for raw AQL passthrough — see
+> [AQL passthrough](#aql-passthrough)). Writes (`INSERT`/`DELETE`) are out of scope for now — see
 > [Limitations](#limitations).
 
 ## Requirements
@@ -62,6 +63,7 @@ arangodb.password=
 | `arangodb.max-splits` | `32` | Hard cap on the number of splits per collection scan. |
 | `arangodb.shard-parallelism-enabled` | `true` | Set to `false` to force single-split scans unconditionally and never invoke the internal `shardIds` option. |
 | `arangodb.aggregation-pushdown-enabled` | `true` | Set `false` to compute every aggregate in Trino instead of pushing it into AQL. See [Aggregation pushdown](#aggregation-pushdown). |
+| `arangodb.query-function-enabled` | `true` | Set `false` to remove the `arango.system.query` table function entirely. See [AQL passthrough](#aql-passthrough). |
 
 ## Data model
 
@@ -198,6 +200,30 @@ Two interactions worth knowing:
   a *prefilter* — enforced partly in AQL and partly by Trino's re-check — so an aggregate computed
   server-side alone would count rows the re-check drops. `... WHERE double_col > 100 GROUP BY city`
   pushes; `... WHERE bigint_col > 100 GROUP BY city` does not. Missed optimization, correct answer.
+
+## AQL passthrough
+
+`arango.system.query(database, query)` is a table function that runs a raw AQL query verbatim and
+exposes its result as a Trino table, for graph traversals and other AQL that has no relational
+equivalent:
+
+```sql
+SELECT *
+FROM TABLE(arango.system.query(
+    database => 'shop',
+    query => 'WITH users FOR v IN 1..2 OUTBOUND "users/ada" follows RETURN {name: v.name}'));
+```
+
+Read-only is enforced by inspecting the query's `EXPLAIN` plan and rejecting anything that is not
+purely `"read"` access, but this check is defense in depth, not the primary control — deploy the
+connector with a read-only ArangoDB user as the actual guarantee. The query also runs once at
+planning time (to sample rows and derive a schema) and once again at execution, so it must be
+side-effect-free and must return at least one row, or planning fails. The planning-time sample is
+`arangodb.schema.sample-size` rows (default 1000) — the same knob schema inference uses for
+ordinary table scans. `LIMIT` cannot be pushed into opaque AQL, and the execution cursor is
+non-streaming, so the server materializes the full passthrough result regardless of any Trino-side
+`LIMIT` (matching the existing scan path's cursor behavior). Set
+`arangodb.query-function-enabled=false` to remove the function entirely.
 
 ## Type coercion
 

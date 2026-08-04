@@ -110,6 +110,16 @@ jobs:
           mvn -B --no-transfer-progress -Ddocker.api.version="${DOCKER_API}" \
             -Pcluster-its -Dsurefire.skip=true verify
 
+      # Cheap backstop for what the in-JVM per-service log consumers (TestingArangoCluster)
+      # can't see: a container's exit code/status survives even after compose.stop(), so this
+      # catches e.g. an OOM-killed or never-created container. The in-JVM logs remain the
+      # primary diagnostic; this is just a few lines of extra context in the job log itself.
+      - name: Dump container state on failure
+        if: failure()
+        run: |
+          docker ps -a
+          docker images
+
       # Without this a nightly failure shows only "the job went red" -- the reports are what
       # make it diagnosable after the runner is gone.
       - name: Upload failsafe reports

@@ -20,7 +20,9 @@ import io.arango.trino.aggregation.ArangoAggregation;
 import io.arango.trino.client.ArangoClient;
 import io.arango.trino.client.ArangoClient.CollectionInfo;
 import io.arango.trino.handle.ArangoColumnHandle;
+import io.arango.trino.handle.ArangoQueryHandle;
 import io.arango.trino.handle.ArangoTableHandle;
+import io.arango.trino.ptf.ArangoQueryFunction.QueryFunctionHandle;
 import io.arango.trino.schema.SchemaResolver;
 import io.arango.trino.schema.SchemaResolver.ArangoColumn;
 import io.trino.spi.TrinoException;
@@ -28,6 +30,7 @@ import io.trino.spi.connector.*;
 import io.trino.spi.expression.ConnectorExpression;
 import io.trino.spi.expression.FieldDereference;
 import io.trino.spi.expression.Variable;
+import io.trino.spi.function.table.ConnectorTableFunctionHandle;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.predicate.ValueSet;
@@ -130,6 +133,15 @@ public class ArangoMetadata implements ConnectorMetadata {
     @Override
     public ConnectorTableMetadata getTableMetadata(
             ConnectorSession session, ConnectorTableHandle table) {
+        if (table instanceof ArangoQueryHandle queryHandle) {
+            // a passthrough has no collection identity; the synthesized name renders in EXPLAIN
+            // (spec §5.2 — PlanPrinter reaches here through the getTableName default chain)
+            return new ConnectorTableMetadata(
+                    queryHandle.schemaTableName(),
+                    queryHandle.columns().stream()
+                            .map(ArangoColumnHandle::toColumnMetadata)
+                            .collect(ImmutableList.toImmutableList()));
+        }
         ArangoTableHandle handle = (ArangoTableHandle) table;
         List<ColumnMetadata> columns =
                 resolve(handle).stream()
@@ -148,6 +160,13 @@ public class ArangoMetadata implements ConnectorMetadata {
     @Override
     public Map<String, ColumnHandle> getColumnHandles(
             ConnectorSession session, ConnectorTableHandle table) {
+        if (table instanceof ArangoQueryHandle queryHandle) {
+            ImmutableMap.Builder<String, ColumnHandle> derived = ImmutableMap.builder();
+            for (ArangoColumnHandle column : queryHandle.columns()) {
+                derived.put(column.name(), column);
+            }
+            return derived.buildOrThrow();
+        }
         ArangoTableHandle handle = (ArangoTableHandle) table;
         ImmutableMap.Builder<String, ColumnHandle> out = ImmutableMap.builder();
         for (ArangoColumn c : resolve(handle)) {
@@ -193,6 +212,11 @@ public class ArangoMetadata implements ConnectorMetadata {
     @Override
     public Optional<ConstraintApplicationResult<ConnectorTableHandle>> applyFilter(
             ConnectorSession session, ConnectorTableHandle table, Constraint constraint) {
+        // Opaque user AQL: nothing can be pushed into it (spec §6). Must precede the
+        // ArangoTableHandle cast.
+        if (table instanceof ArangoQueryHandle) {
+            return Optional.empty();
+        }
         ArangoTableHandle handle = (ArangoTableHandle) table;
         // A filter arriving after aggregation is a HAVING, but AqlBuilder renders pushed filters
         // BEFORE the COLLECT -- pushing it would silently evaluate it as a WHERE over pre-grouped
@@ -328,6 +352,11 @@ public class ArangoMetadata implements ConnectorMetadata {
             List<AggregateFunction> aggregates,
             Map<String, ColumnHandle> assignments,
             List<List<ColumnHandle>> groupingSets) {
+        // Opaque user AQL: nothing can be pushed into it (spec §6). Must precede the
+        // ArangoTableHandle cast.
+        if (table instanceof ArangoQueryHandle) {
+            return Optional.empty();
+        }
         ArangoTableHandle handle = (ArangoTableHandle) table;
         Optional<ArangoAggregation> planned =
                 AggregatePushdown.plan(config, handle, aggregates, assignments, groupingSets);
@@ -364,6 +393,11 @@ public class ArangoMetadata implements ConnectorMetadata {
     @Override
     public Optional<LimitApplicationResult<ConnectorTableHandle>> applyLimit(
             ConnectorSession session, ConnectorTableHandle table, long limit) {
+        // Opaque user AQL: nothing can be pushed into it (spec §6). Must precede the
+        // ArangoTableHandle cast.
+        if (table instanceof ArangoQueryHandle) {
+            return Optional.empty();
+        }
         ArangoTableHandle handle = (ArangoTableHandle) table;
         if (handle.limit().isPresent() && handle.limit().getAsLong() <= limit) {
             return Optional.empty();
@@ -387,6 +421,11 @@ public class ArangoMetadata implements ConnectorMetadata {
             ConnectorTableHandle table,
             List<ConnectorExpression> projections,
             Map<String, ColumnHandle> assignments) {
+        // Opaque user AQL: nothing can be pushed into it (spec §6). Must precede the
+        // ArangoTableHandle cast.
+        if (table instanceof ArangoQueryHandle) {
+            return Optional.empty();
+        }
         // Explicit rather than incidental: today the !progress exit below happens to catch this,
         // because every aggregate output and grouping key is scalar so no FieldDereference can
         // resolve against one. That is safety by coincidence -- a later widening of the
@@ -502,5 +541,16 @@ public class ArangoMetadata implements ConnectorMetadata {
             throwIfUnchecked(cause); // resolveColumns throws only unchecked; this rethrows it as-is
             throw new RuntimeException(cause); // unreachable, required for the compiler
         }
+    }
+
+    @Override
+    public Optional<TableFunctionApplicationResult<ConnectorTableHandle>> applyTableFunction(
+            ConnectorSession session, ConnectorTableFunctionHandle handle) {
+        if (!(handle instanceof QueryFunctionHandle queryFunctionHandle)) {
+            return Optional.empty();
+        }
+        ArangoQueryHandle table = queryFunctionHandle.tableHandle();
+        return Optional.of(
+                new TableFunctionApplicationResult<>(table, ImmutableList.copyOf(table.columns())));
     }
 }
