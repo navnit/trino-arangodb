@@ -23,13 +23,14 @@ import org.testcontainers.containers.wait.strategy.Wait;
  * startup-timeout window every time and never landed in between -- ruling out "the boot is slow" (a
  * slow-but-progressing boot would show intermediate durations). The per-service log consumers wired
  * below were added to capture the evidence needed to find the actual cause, and did: it is a
- * genuine deadlock, not slowness, and the CI capture identified two distinct boot-order races (both
- * now fixed in {@code arangodb-cluster-compose.yml}, see the comment block at the top of that file)
- * -- an agency-not-ready race (the coordinator started 1.4s before the agency finished leader
- * election, so both it and dbserver1 waited forever on agency state that was never written) and a
- * phantom throwaway-instance registration race in the ArangoDB image's own {@code /entrypoint.sh}.
- * Neither deadlock times out on its own, which is why no timeout value could ever have fixed this
- * by itself.
+ * genuine deadlock, not slowness. The CI capture identified one boot-order race directly -- the
+ * coordinator started 1.4s before the agency finished leader election, so both it and dbserver1
+ * waited forever on agency state that was never written -- and reproducing that fix locally
+ * surfaced a second, unrelated one: a phantom throwaway-instance registration race in the ArangoDB
+ * image's own {@code /entrypoint.sh}, never visible in the CI capture because the first race always
+ * fired first and masked it. Both are now fixed in {@code arangodb-cluster-compose.yml} (see the
+ * comment block at the top of that file). Neither deadlock times out on its own, which is why no
+ * timeout value could ever have fixed this by itself.
  *
  * <p><b>Retry with a FRESH container per attempt stays as the safety net.</b> The compose-level fix
  * addresses the races that were actually observed, but does not guarantee no boot ever hangs for
@@ -73,9 +74,11 @@ public final class TestingArangoCluster implements AutoCloseable {
      * agency -- the exact symptom captured from the deadlocked CI run this class was written to
      * survive. A plain substring match on purpose: safe to go stale (a future ArangoDB message
      * change just means detection never fires, degrading to the existing timeout), not worth making
-     * clever.
+     * clever. Package-private (not {@code private}) so {@code TestingArangoClusterRetryTest} can
+     * assert it verbatim against a captured log line, rather than every test re-typing the string
+     * and being unable to catch a typo in the real constant.
      */
-    private static final String DEADLOCK_SIGNATURE = "Plan/DBServers in agency is no object";
+    static final String DEADLOCK_SIGNATURE = "Plan/DBServers in agency is no object";
 
     /**
      * How many times {@link #DEADLOCK_SIGNATURE} may appear before an attempt is aborted early.
@@ -153,6 +156,14 @@ public final class TestingArangoCluster implements AutoCloseable {
      * helper it uses under the hood surfaces an interrupted {@code Future#get} as its normal
      * timeout exception), so this aborts the attempt within roughly one log line's worth of latency
      * instead of waiting out {@link #STARTUP_TIMEOUT}.
+     *
+     * <p>The log consumer keeps streaming for the container's whole lifetime, not just during this
+     * method -- so both the {@code finally} below and the {@code catch} explicitly disarm the
+     * detector before returning or throwing. Without that, a winning attempt's detector would keep
+     * accumulating against the (still-running) container and could interrupt an unrelated later
+     * thread mid-test; a losing attempt's detector could latch after this method has already thrown
+     * for an unrelated reason and interrupt the *next* attempt, aborting it in seconds but under
+     * the wrong label.
      */
     private static ComposeContainer attemptBoot() {
         Map<String, CappedLog> logs = new HashMap<>();
@@ -193,6 +204,13 @@ public final class TestingArangoCluster implements AutoCloseable {
             awaitClusterReady(candidate, READY_TIMEOUT);
             return candidate;
         } catch (RuntimeException e) {
+            // Clear a lingering interrupt FIRST, before stop(): awaitClusterReady re-sets the flag
+            // before throwing on its own interrupted sleep, and candidate.stop() runs a full
+            // GenericContainer teardown that itself performs interruptible waits. Calling stop()
+            // with the flag still set risks stop() throwing instead of tearing down cleanly, which
+            // would skip the BootAttemptException below entirely and hand reportFailedAttempt a
+            // bare exception -- a blank dump, the wrong reason label, and a leaked compose project.
+            Thread.interrupted();
             candidate.stop();
             Map<String, List<String>> snapshot = new HashMap<>();
             for (String service : SERVICES) {
@@ -200,10 +218,15 @@ public final class TestingArangoCluster implements AutoCloseable {
             }
             throw new BootAttemptException(e, snapshot, deadlockDetector.triggered());
         } finally {
-            // Clear a lingering interrupt so it can't spuriously fail the *next* attempt: this
-            // thread is reused across bootWithRetries' loop, and Thread#interrupt leaves the flag
-            // set until something consumes it. Harmless no-op when the attempt succeeded outright
-            // or failed for an unrelated reason.
+            // Disarm the detector and clear any lingering interrupt so neither can affect anything
+            // after this method returns/throws: the log consumer keeps streaming for the
+            // container's whole lifetime (not just this method), so a still-armed detector on a
+            // *winning* attempt's container could later interrupt an unrelated thread mid-test, and
+            // one on a *losing* attempt could latch just after this method threw for an unrelated
+            // reason and interrupt the next attempt (which reuses this same thread) under the wrong
+            // label. Redundant with the catch-block clear above on the exception path; belt and
+            // braces for the success path and any path this catch doesn't cover.
+            deadlockDetector.disarm();
             Thread.interrupted();
         }
     }
@@ -305,6 +328,16 @@ public final class TestingArangoCluster implements AutoCloseable {
 
         synchronized boolean triggered() {
             return triggered;
+        }
+
+        /**
+         * Permanently disables further triggering. Called once {@code attemptBoot} is done with
+         * this detector (win or lose) so frames that arrive afterward -- the log consumer outlives
+         * this method, streaming for as long as the container itself runs -- can never fire {@link
+         * #record} again.
+         */
+        synchronized void disarm() {
+            triggered = true;
         }
     }
 

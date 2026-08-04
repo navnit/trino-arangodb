@@ -88,22 +88,43 @@ class TestingArangoClusterRetryTest {
         throw new AssertionError("onFailure must not be invoked when the first attempt succeeds");
     }
 
+    /**
+     * Captured verbatim from the deadlocked CI run's dbserver1 log (see the fix's design doc /
+     * commit message). Asserting the real {@link TestingArangoCluster#DEADLOCK_SIGNATURE} appears
+     * in it -- rather than every test below re-typing the substring by hand -- means a typo in the
+     * production constant would fail this test instead of silently passing every other one.
+     */
+    private static final String CAPTURED_DBSERVER_LOG_LINE =
+            "WARNING {startup} Plan/DBServers in agency is no object, but none. Agency not"
+                    + " initialized?";
+
+    @Test
+    void deadlockSignatureConstantMatchesTheCapturedLogLineVerbatim() {
+        assertTrue(CAPTURED_DBSERVER_LOG_LINE.contains(TestingArangoCluster.DEADLOCK_SIGNATURE));
+    }
+
     @Test
     void countMatchingLinesCountsOnlyLinesContainingTheSignature() {
         String frame =
                 "some other line\n"
-                        + "Plan/DBServers in agency is no object, but none. Agency not"
-                        + " initialized?\n"
+                        + CAPTURED_DBSERVER_LOG_LINE
+                        + "\n"
                         + "another unrelated line\n"
-                        + "Plan/DBServers in agency is no object, but none. Agency not"
-                        + " initialized?\n";
-        assertEquals(2, TestingArangoCluster.countMatchingLines(frame, "Plan/DBServers"));
+                        + CAPTURED_DBSERVER_LOG_LINE
+                        + "\n";
+        assertEquals(
+                2,
+                TestingArangoCluster.countMatchingLines(
+                        frame, TestingArangoCluster.DEADLOCK_SIGNATURE));
     }
 
     @Test
     void countMatchingLinesReturnsZeroWhenTheSignatureNeverAppears() {
         String frame = "ArangoDB is ready for business\nusing endpoint tcp://0.0.0.0:8530\n";
-        assertEquals(0, TestingArangoCluster.countMatchingLines(frame, "Plan/DBServers"));
+        assertEquals(
+                0,
+                TestingArangoCluster.countMatchingLines(
+                        frame, TestingArangoCluster.DEADLOCK_SIGNATURE));
     }
 
     @Test

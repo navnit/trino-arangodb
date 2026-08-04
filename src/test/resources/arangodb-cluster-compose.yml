@@ -45,19 +45,26 @@ services:
     # answers as soon as the general HTTP listener is up, which is measurably *before* the
     # agency has a leader -- confirmed by polling both endpoints from inside a standalone agency
     # container in a tight loop and observing `/_api/version` return 200 ~100-150ms before
-    # `/_api/agency/config` reports a non-empty `leaderId`. `/_api/agency/config` itself is also
-    # insufficient by itself: it returns 200 with `"leaderId":""` for (in one observed run)
-    # thousands of polls before the single-node election completes and `leaderId` is populated
-    # -- the same class of false-positive "a socket is open" signal, just on a different
-    # endpoint. Only a 200 response whose body carries a non-empty `leaderId` (matched here as
-    # `"leaderId":"AGNT`, ArangoDB's agent-ID prefix) coincides with the agency's own "rebuilt
-    # key-value stores - serving" log line, which is the actual readiness signal
-    # dbserver1/coordinator need.
+    # `/_api/agency/config` reports a non-empty `leaderId`. That ~100-150ms gap is small, but it
+    # corroborates the CI capture's 1.4s coordinator-vs-agency race margin being real and easy to
+    # lose. `/_api/agency/config` itself is also insufficient by itself: it returns 200 with
+    # `"leaderId":""` for (in one observed run) ~2,800 consecutive polls -- roughly 1.5s at the
+    # observed rate -- before the single-node election completes and `leaderId` is populated --
+    # the same class of false-positive "a socket is open" signal, just on a different endpoint.
+    # Only a 200 response whose body carries a non-empty `leaderId` coincides with the agency's
+    # own "rebuilt key-value stores - serving" log line, which is the actual readiness signal
+    # dbserver1/coordinator need. The matcher below tests for *any* non-empty `leaderId` value
+    # rather than ArangoDB's current `AGNT-` agent-id prefix specifically: `ComposeContainer`
+    # attaches log/output consumers only after `docker compose up` returns, so if this healthcheck
+    # never goes healthy, `up` fails with "dependency failed to start" and every service's log
+    # (including the agency's own) comes back empty in the failure dump -- a brittler matcher
+    # would turn a harmless future ID-format change into repeated ~2-minute CI failures with no
+    # diagnostics to act on.
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          "wget -qO- http://127.0.0.1:8531/_api/agency/config | grep -q '\"leaderId\":\"AGNT'",
+          "wget -qO- http://127.0.0.1:8531/_api/agency/config | grep -q '\"leaderId\":\"[^\"]'",
         ]
       interval: 2s
       timeout: 2s
@@ -103,5 +110,13 @@ services:
     depends_on:
       agency:
         condition: service_healthy
+      # dbserver1 has no healthcheck of its own, so this stays the plain `service_started`
+      # default -- deliberately, not an oversight: unlike the agency, dbserver1 has no
+      # analogous "answers HTTP but isn't really ready" trap for the coordinator to race
+      # past, because the coordinator's own "Waiting for DBservers to show up..." loop
+      # already polls until dbserver1 has actually registered. That loop only became a
+      # permanent hang under Race B (the phantom throwaway-instance registration, fixed
+      # above via `SKIP_DATABASE_INIT`); with Race B closed, a `service_started` dbserver1
+      # dependency is a real, terminating poll, not a race.
       dbserver1:
         condition: service_started
