@@ -158,12 +158,13 @@ public final class TestingArangoCluster implements AutoCloseable {
      * instead of waiting out {@link #STARTUP_TIMEOUT}.
      *
      * <p>The log consumer keeps streaming for the container's whole lifetime, not just during this
-     * method -- so both the {@code finally} below and the {@code catch} explicitly disarm the
-     * detector before returning or throwing. Without that, a winning attempt's detector would keep
-     * accumulating against the (still-running) container and could interrupt an unrelated later
-     * thread mid-test; a losing attempt's detector could latch after this method has already thrown
-     * for an unrelated reason and interrupt the *next* attempt, aborting it in seconds but under
-     * the wrong label.
+     * method -- so the {@code finally} below disarms the detector on every exit path (success,
+     * caught failure, or anything the {@code catch} doesn't cover); the {@code catch} separately
+     * clears the interrupt flag before {@code stop()}, for the unrelated reason explained there.
+     * Without disarming, a winning attempt's detector would keep accumulating against the
+     * (still-running) container and could interrupt an unrelated later thread mid-test; a losing
+     * attempt's detector could latch after this method has already thrown for an unrelated reason
+     * and interrupt the *next* attempt, aborting it in seconds but under the wrong label.
      */
     private static ComposeContainer attemptBoot() {
         Map<String, CappedLog> logs = new HashMap<>();
@@ -309,13 +310,24 @@ public final class TestingArangoCluster implements AutoCloseable {
      * {@link #record} returns {@code true} exactly once -- on the call that crosses the threshold
      * -- so callers can trigger a side effect (interrupting the boot thread) precisely once per
      * attempt.
+     *
+     * <p>{@code armed} and {@code triggered} are deliberately separate fields, not one field doing
+     * double duty: {@code armed} is "should {@link #record} still do anything" (turned off once by
+     * {@link #disarm()}), {@code triggered} is "did the signature actually cross the threshold"
+     * (read by {@link #triggered()} for {@link BootAttemptException}'s reason label). Collapsing
+     * them into a single flag -- as an earlier version of this class did, using {@code triggered}
+     * for both -- would make the reason label's correctness depend on {@link #triggered()} being
+     * read before {@link #disarm()} runs, an ordering that is easy to break by moving or
+     * duplicating a {@code disarm()} call. With two fields, {@link #disarm()} cannot affect what
+     * {@link #triggered()} reports, so no such ordering exists to break.
      */
     private static final class DeadlockDetector {
         private int count;
+        private boolean armed = true;
         private boolean triggered;
 
         synchronized boolean record(String frameText) {
-            if (triggered) {
+            if (!armed || triggered) {
                 return false;
             }
             count += countMatchingLines(frameText, DEADLOCK_SIGNATURE);
@@ -326,18 +338,21 @@ public final class TestingArangoCluster implements AutoCloseable {
             return true;
         }
 
+        /**
+         * Whether the signature actually crossed the threshold -- unaffected by {@link #disarm()}.
+         */
         synchronized boolean triggered() {
             return triggered;
         }
 
         /**
-         * Permanently disables further triggering. Called once {@code attemptBoot} is done with
-         * this detector (win or lose) so frames that arrive afterward -- the log consumer outlives
-         * this method, streaming for as long as the container itself runs -- can never fire {@link
-         * #record} again.
+         * Permanently disables further triggering (and further counting) without touching {@link
+         * #triggered}. Called once {@code attemptBoot} is done with this detector (win or lose) so
+         * frames that arrive afterward -- the log consumer outlives this method, streaming for as
+         * long as the container itself runs -- can never fire {@link #record} again.
          */
         synchronized void disarm() {
-            triggered = true;
+            armed = false;
         }
     }
 
