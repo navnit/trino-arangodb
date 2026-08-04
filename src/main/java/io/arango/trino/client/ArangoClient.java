@@ -124,6 +124,24 @@ public class ArangoClient implements AutoCloseable {
     }
 
     /**
+     * Metadata-level count (GET /_api/collection/{name}/count) for table statistics (spec M6-A §3).
+     * Deliberately not countWithShardIds: that runs an AQL COLLECT WITH COUNT for probe fidelity,
+     * and the optimizer is not guaranteed to collapse it to a metadata read. The driver returns a
+     * nullable boxed Long; null or negative must not reach TableStatistics, whose constructor
+     * throws on a negative row count — surface it as a failure the caller degrades to unknown stats
+     * instead.
+     */
+    public long countDocuments(String database, String collection) {
+        Long count = arango.db(database).collection(collection).count().getCount();
+        if (count == null || count < 0) {
+            throw new IllegalStateException(
+                    "ArangoDB returned no usable count for %s.%s: %s"
+                            .formatted(database, collection, count));
+        }
+        return count;
+    }
+
+    /**
      * Raw POST /_api/explain (spec §8.1): the gate needs plan.collections[].type, which the
      * driver's non-deprecated typed API does not expose. Full response body, uninterpreted —
      * AqlReadOnlyGate owns all shape validation so it can fail closed.

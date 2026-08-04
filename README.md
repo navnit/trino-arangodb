@@ -64,6 +64,8 @@ arangodb.password=
 | `arangodb.shard-parallelism-enabled` | `true` | Set to `false` to force single-split scans unconditionally and never invoke the internal `shardIds` option. |
 | `arangodb.aggregation-pushdown-enabled` | `true` | Set `false` to compute every aggregate in Trino instead of pushing it into AQL. See [Aggregation pushdown](#aggregation-pushdown). |
 | `arangodb.query-function-enabled` | `true` | Set `false` to remove the `arango.system.query` table function entirely. See [AQL passthrough](#aql-passthrough). |
+| `arangodb.statistics-enabled` | `true` | Expose row-count table statistics to the optimizer; `false` returns unknown statistics everywhere. |
+| `arangodb.statistics.cache-ttl` | `5m` | How long a collection row count is cached for planning. |
 
 ## Data model
 

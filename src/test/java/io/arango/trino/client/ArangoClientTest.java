@@ -1,17 +1,16 @@
 package io.arango.trino.client;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
 import io.arango.trino.ArangoConfig;
 import io.arango.trino.TestingArangoServer;
 import io.arango.trino.client.ArangoClient.CollectionInfo;
+import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
-
-import java.util.List;
-import java.util.Map;
-
-import static org.assertj.core.api.Assertions.assertThat;
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ArangoClientTest {
@@ -21,15 +20,18 @@ class ArangoClientTest {
     @BeforeAll
     void setup() {
         server = new TestingArangoServer();
-        client = new ArangoClient(new ArangoConfig()
-                .setHosts(server.hostPort())
-                .setUser("root")
-                .setPassword(server.rootPassword()));
+        client =
+                new ArangoClient(
+                        new ArangoConfig()
+                                .setHosts(server.hostPort())
+                                .setUser("root")
+                                .setPassword(server.rootPassword()));
         // seed: database "shop" with document collection "users"
         client.createDatabaseForTest("shop");
         client.createDocumentCollectionForTest("shop", "users");
         client.insertForTest("shop", "users", Map.of("name", "ada", "age", 36L));
         client.insertForTest("shop", "users", Map.of("name", "bob", "age", 41L));
+        client.createDocumentCollectionForTest("shop", "empty_col");
     }
 
     @AfterAll
@@ -46,11 +48,13 @@ class ArangoClientTest {
     @Test
     void listCollectionsMarksTypeAndSystem() {
         List<CollectionInfo> cols = client.listCollections("shop");
-        assertThat(cols).anySatisfy(c -> {
-            assertThat(c.name()).isEqualTo("users");
-            assertThat(c.isEdge()).isFalse();
-            assertThat(c.isSystem()).isFalse();
-        });
+        assertThat(cols)
+                .anySatisfy(
+                        c -> {
+                            assertThat(c.name()).isEqualTo("users");
+                            assertThat(c.isEdge()).isFalse();
+                            assertThat(c.isSystem()).isFalse();
+                        });
     }
 
     @Test
@@ -58,5 +62,15 @@ class ArangoClientTest {
         List<Map<String, Object>> docs = client.sampleDocuments("shop", "users", 10, false);
         assertThat(docs).hasSize(2);
         assertThat(docs).allSatisfy(d -> assertThat(d).containsKey("name"));
+    }
+
+    @Test
+    void countDocumentsReturnsSeededCount() {
+        assertThat(client.countDocuments("shop", "users")).isEqualTo(2L);
+    }
+
+    @Test
+    void countDocumentsOnEmptyCollectionIsZero() {
+        assertThat(client.countDocuments("shop", "empty_col")).isEqualTo(0L);
     }
 }

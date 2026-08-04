@@ -14,6 +14,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.util.concurrent.UncheckedExecutionException;
 import com.google.inject.Inject;
+import io.airlift.log.Logger;
 import io.arango.trino.aggregation.AggregatePushdown;
 import io.arango.trino.aggregation.AggregateSpec;
 import io.arango.trino.aggregation.ArangoAggregation;
@@ -34,6 +35,8 @@ import io.trino.spi.function.table.ConnectorTableFunctionHandle;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.predicate.ValueSet;
+import io.trino.spi.statistics.Estimate;
+import io.trino.spi.statistics.TableStatistics;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.BigintType;
 import io.trino.spi.type.BooleanType;
@@ -57,6 +60,8 @@ public class ArangoMetadata implements ConnectorMetadata {
     // must propagate as such rather than being silently misreported as "table doesn't exist".
     private static final int ERROR_DATABASE_NOT_FOUND = 1228;
 
+    private static final Logger log = Logger.get(ArangoMetadata.class);
+
     private final ArangoClient client;
     private final SchemaResolver schemaResolver;
     private final ArangoConfig config;
@@ -64,6 +69,10 @@ public class ArangoMetadata implements ConnectorMetadata {
     // collection once; entries expire a fixed span after resolution so a stale schema
     // surfaces as a normal NULL on a missing field, not an error.
     private final Cache<SchemaTableName, List<ArangoColumn>> columnCache;
+    // Row-count cache for getTableStatistics (M6-A spec §3): planning may ask several times per
+    // query and across concurrent queries; a TTL-stale count is fine for costing. Only successful
+    // counts enter (no negative caching — a transient failure retries on the next planning call).
+    private final Cache<SchemaTableName, Long> countCache;
 
     @Inject
     public ArangoMetadata(ArangoClient client, SchemaResolver schemaResolver, ArangoConfig config) {
@@ -82,6 +91,11 @@ public class ArangoMetadata implements ConnectorMetadata {
         this.columnCache =
                 CacheBuilder.newBuilder()
                         .expireAfterWrite(config.getSchemaCacheTtl().toMillis(), MILLISECONDS)
+                        .ticker(ticker)
+                        .build();
+        this.countCache =
+                CacheBuilder.newBuilder()
+                        .expireAfterWrite(config.getStatisticsCacheTtl().toMillis(), MILLISECONDS)
                         .ticker(ticker)
                         .build();
     }
@@ -388,6 +402,67 @@ public class ArangoMetadata implements ConnectorMetadata {
                         // Grouping columns keep their own handles, so nothing needs remapping.
                         ImmutableMap.of(),
                         false));
+    }
+
+    /**
+     * M6-A (spec 2026-08-04): row-count-only statistics. A guard chain — first matching rule wins:
+     * kill switch, passthrough decline, aggregation rows (a global aggregate is exactly one row, a
+     * grouped one unknowable), then the TTL-cached collection count (with the pushed limit applied
+     * as a min only when it is exact, and a count failure degrading to unknown).
+     */
+    @Override
+    public TableStatistics getTableStatistics(
+            ConnectorSession session, ConnectorTableHandle table) {
+        if (!config.isStatisticsEnabled()) {
+            return TableStatistics.empty();
+        }
+        // Same instanceof-decline-first pattern as the pushdown hooks: opaque user AQL has no
+        // collection to count.
+        if (table instanceof ArangoQueryHandle) {
+            return TableStatistics.empty();
+        }
+        ArangoTableHandle handle = (ArangoTableHandle) table;
+        if (handle.aggregation().isPresent()) {
+            // A global aggregate (empty groupingColumns) emits exactly one row — known exactly,
+            // matching the engine's own AggregationStatsRule.
+            if (handle.aggregation().get().groupingColumns().isEmpty()) {
+                return TableStatistics.builder().setRowCount(Estimate.of(1)).build();
+            }
+            // Grouped: cardinality is unknowable without NDV stats — unless a pushed limit caps
+            // it. applyLimit reports limitGuaranteed=true for aggregated handles (single split,
+            // LIMIT rendered after the COLLECT), so the cap is exact (spec §2).
+            if (handle.limit().isPresent()) {
+                return TableStatistics.builder()
+                        .setRowCount(Estimate.of(handle.limit().getAsLong()))
+                        .build();
+            }
+            return TableStatistics.empty();
+        }
+        long count;
+        try {
+            count =
+                    countCache.get(
+                            handle.schemaTableName(),
+                            () -> client.countDocuments(handle.schema(), handle.table()));
+        } catch (ExecutionException | UncheckedExecutionException e) {
+            // Deliberate deviation from this class's translation rule (spec §4): statistics are
+            // advisory — empty() is the SPI's "unknown" — and failing planning over an optional
+            // signal would kill queries whose scan path still works. WARN keeps it observable;
+            // per-call WARN during an outage is accepted (queries are failing loudly anyway).
+            log.warn(
+                    e.getCause(),
+                    "Statistics unavailable for %s; returning unknown",
+                    handle.schemaTableName());
+            return TableStatistics.empty();
+        }
+        long rowCount = count;
+        // min(count, limit) only when the pushed limit is exact (single-split — mirrors
+        // applyLimit's limitGuaranteed). Under fan-out the scan node really can emit up to
+        // splits*n rows and the engine's retained LimitNode applies the min itself (spec §2).
+        if (handle.limit().isPresent() && !config.isShardParallelismEnabled()) {
+            rowCount = Math.min(rowCount, handle.limit().getAsLong());
+        }
+        return TableStatistics.builder().setRowCount(Estimate.of(rowCount)).build();
     }
 
     @Override
