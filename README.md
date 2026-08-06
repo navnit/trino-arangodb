@@ -4,14 +4,17 @@
 
 A [Trino](https://trino.io) connector that lets you run SQL against [ArangoDB](https://arangodb.com).
 ArangoDB **databases map to Trino schemas** and **collections map to tables**; schemas are
-inferred by sampling documents. The connector is currently **read-only**, with equality/IN
-filter pushdown for all scalar types, guarded numeric range pushdown, and `LIMIT` pushdown.
+inferred by sampling documents by default, or pinned explicitly per table via a
+[schema-override collection](#schema-overrides). The connector is currently **read-only**, with
+equality/IN filter pushdown for all scalar types, guarded numeric range pushdown, and `LIMIT`
+pushdown.
 
-> **Status.** Milestones **M1**–**M5** and **M6-B** are complete (**M5**: aggregation pushdown —
-> `COUNT`/`SUM`/`MIN`/`MAX`/`AVG` and `GROUP BY` executed as an AQL `COLLECT` on a single
-> split; **M6-B**: an `arango.system.query` table function for raw AQL passthrough — see
-> [AQL passthrough](#aql-passthrough)). Writes (`INSERT`/`DELETE`) are out of scope for now — see
-> [Limitations](#limitations).
+> **Status.** Milestones **M1**–**M5** and **M6-A**–**M6-C** are complete (**M5**: aggregation
+> pushdown — `COUNT`/`SUM`/`MIN`/`MAX`/`AVG` and `GROUP BY` executed as an AQL `COLLECT` on a
+> single split; **M6-B**: an `arango.system.query` table function for raw AQL passthrough — see
+> [AQL passthrough](#aql-passthrough); **M6-C**: user-curated schema-override documents and
+> declared `decimal`/`timestamp` types — see [Schema overrides](#schema-overrides)). Writes
+> (`INSERT`/`DELETE`) are out of scope for now — see [Limitations](#limitations).
 
 ## Requirements
 
@@ -66,6 +69,7 @@ arangodb.password=
 | `arangodb.query-function-enabled` | `true` | Set `false` to remove the `arango.system.query` table function entirely. See [AQL passthrough](#aql-passthrough). |
 | `arangodb.statistics-enabled` | `true` | Expose row-count table statistics to the optimizer; `false` returns unknown statistics everywhere. |
 | `arangodb.statistics.cache-ttl` | `5m` | How long a collection row count is cached for planning. |
+| `arangodb.schema-collection` | `trino_schema` | Per-database collection holding user-curated schema-override documents. See [Schema overrides](#schema-overrides). |
 
 ## Data model
 
@@ -102,7 +106,106 @@ Merging an integer-typed and a floating-point occurrence of the same field **wid
 and (since M4) selecting their **values** materializes them recursively: under
 `arangodb.type-coercion=lenient` a type-mismatched leaf reads as `NULL` (only that element/field,
 not the whole row), while `strict` raises `ARANGODB_TYPE_CONVERSION_ERROR` with a path to the
-offending leaf (e.g. `col[2].b`).
+offending leaf (e.g. `col[2].b`). As of M6-C, this also applies to a sampled `DECIMAL(38,0)`
+column, not just a declared `decimal(p,s)` override — decimal materialization is one
+type-dispatched code path regardless of how the column's type was determined, so a numeric
+string now converts too (exact fit at the column's scale only; under `strict` this loosens what
+was previously an error into a successful parse). See "Decimals should be stored as strings"
+under [Schema overrides](#schema-overrides) for the exact-fit rule.
+
+## Schema overrides
+
+Sampling is the default schema source, but you can pin a table's schema explicitly instead by
+writing a document to a per-database **schema-override collection** (`arangodb.schema-collection`,
+default `trino_schema`). When a matching override doc exists for a table, it is the **complete**
+user-column set — sampling does not run for that table at all.
+
+### Doc shape
+
+One document per table, in the override collection of the *same database* as the described table:
+
+```json
+{ "table": "orders",
+  "fields": [
+    { "name": "total",     "type": "decimal(12,2)" },
+    { "name": "placed_at", "type": "timestamp(3) with time zone", "hidden": false }
+  ] }
+```
+
+- `table` — required, non-empty string: the described collection's name.
+- `fields` — required, non-empty array of `{name, type, hidden}` objects:
+  - `name` — required, non-empty, must not start with `_` (system attributes are appended
+    automatically), and must not duplicate another field's name case-insensitively (Trino resolves
+    column identifiers case-insensitively, so `Total` and `total` would be indistinguishable at
+    query time).
+  - `type` — required string, parsed by Trino's own type parser then checked against the
+    supported vocabulary below.
+  - `hidden` — optional boolean, default `false`.
+- `_key`/`_id`/`_rev`/`_from`/`_to` are appended automatically exactly as on the sampling path
+  (hidden `VARCHAR` system attributes always; `_from`/`_to` visible `VARCHAR` for edge
+  collections) — do not declare them yourself.
+
+Any unrecognized key anywhere in the document (a typo like `"hiden"`, or the not-yet-supported
+`path`) is rejected loudly, as is a second document claiming the same `table` — ambiguity is never
+resolved silently. Validation is strict on purpose: the collection is user-curated, so a typo must
+never silently change a schema.
+
+### Type vocabulary
+
+| Declared type | Notes |
+|---|---|
+| `boolean` / `bigint` / `double` / `varchar` | Same behavior as sampled columns. `varchar(n)` (bounded) is rejected — use unbounded `varchar`. |
+| `decimal(p,s)` | Arbitrary precision/scale. **Store decimals as strings** — see below. |
+| `timestamp(3)` | ISO-8601 **local** date-time string (no zone/offset), e.g. `2026-08-05T12:34:56.789`. Fractional seconds finer than millis (e.g. `.7891`) are a mismatch, not rounded. |
+| `timestamp(3) with time zone` | ISO-8601 date-time string **with** a `Z`/offset, e.g. `2026-08-05T12:34:56.789+05:30`. Same finer-than-millis rule; the offset must be a whole minute within ±14:00. |
+| `array(t)` | Recursive: `array(timestamp(3))`, `array(decimal(10,2))`, etc. |
+| `row("f" t, ...)` | Recursive, e.g. `row("amount" decimal(10,2), "note" varchar)`. See the quoting rule below. |
+
+Alias spellings that resolve to the same underlying type are accepted: bare `timestamp` (→
+`timestamp(3)`), bare `decimal` (→ `decimal(38,0)`), and `timestamp(3) without time zone` (→
+`timestamp(3)`). Not supported at all: `date`, `time`, `real`/`integer`/`smallint`/`tinyint`,
+`json`, `uuid`, `varbinary`, timestamp precisions other than 3, and `char`.
+
+**Decimals should be stored as strings.** ArangoDB has no native decimal type, so a `decimal(p,s)`
+column also accepts a plain JSON number — but a stored `double` only matches when its *exact
+binary value* fits the declared scale: `0.25` at `decimal(p,2)` matches, but `12.34` does **not**
+(`12.34` isn't exactly representable in binary floating point, so it reads as a type mismatch —
+`NULL` under `lenient`, an error under `strict`). Storing the value as a decimal **string**
+(`"12.34"`) avoids this entirely and is the encoding the type exists for.
+
+**Quoting rule for nested `row(...)` fields.** SQL identifiers inside a type string are lowercased
+unless double-quoted. `row(placedAt timestamp(3))` parses as field name `placedat`, which then
+never matches a stored attribute named `placedAt` — the column reads all `NULL`, silently, with no
+error. Always double-quote a nested field name that isn't already all-lowercase:
+`row("placedAt" timestamp(3))`.
+
+### Accepted limitations
+
+- **A misspelled (or wrong-case, unquoted) `name` reads as an all-`NULL` column, not an error.**
+  The override exists specifically to avoid sampling, so the connector has no way to check a
+  declared name against what's actually stored. This applies in both `lenient` and `strict`
+  coercion mode — a stored ArangoDB "attribute absent" is AQL `null`, which becomes SQL `NULL`
+  before any type check ever runs.
+- **No renaming.** Field-path remapping (`path`) is not supported yet, so a declared `name` is
+  simultaneously the Trino column name *and* the exact, case-sensitive ArangoDB attribute name — an
+  override cannot expose attribute `placedAt` as column `placed_at`, for example. A doc containing
+  `path` is rejected explicitly ("not yet supported") rather than silently ignored.
+
+### Operational notes
+
+- **Index the override collection on `table`.** Every lookup is `FOR d IN <collection> FILTER
+  d.table == @t LIMIT 2 RETURN d`; without a persistent index on `table`, each lookup scans the
+  whole collection (bounded in practice — one doc per table — but a persistent index makes it
+  O(1)).
+- The override collection itself is an ordinary collection: it shows up in `SHOW TABLES` and is
+  queryable like any other table (hiding it would be surprising, and querying it is useful for
+  debugging).
+- A malformed override doc only breaks queries against *that* table — it's validated lazily, at
+  column-resolution time, not when the catalog is enumerated. `SHOW TABLES` and `SHOW COLUMNS`
+  on sibling tables keep working.
+- With no override collection present at all, nothing changes: every table resolves via sampling,
+  same as before this feature existed. The absence is detected with one cheap existence check per
+  database (cached for `arangodb.schema.cache-ttl`), not a failed query per table.
 
 ## Sharding / parallelism
 

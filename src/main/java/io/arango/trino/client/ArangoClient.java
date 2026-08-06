@@ -30,6 +30,15 @@ import java.util.Map;
 public class ArangoClient implements AutoCloseable {
     private static final Logger log = Logger.get(ArangoClient.class);
 
+    /**
+     * ArangoDB "forbidden" error shape for a collection the user lacks a grant on, observed and
+     * pinned by AqlSchemaOverrideAssumptionsTest (M6-C spec §4.5). SchemaOverrideReader keys its
+     * tailored diagnostic off these — update them ONLY with a new observation.
+     */
+    public static final int ERROR_NUM_FORBIDDEN = 11;
+
+    public static final int HTTP_FORBIDDEN = 403;
+
     public record CollectionInfo(String name, boolean isEdge, boolean isSystem) {}
 
     private final ArangoDB arango;
@@ -71,6 +80,29 @@ public class ArangoClient implements AutoCloseable {
         @SuppressWarnings("unchecked")
         ArangoCursor<Map> cursor =
                 arango.db(database).query(aql, Map.class, Map.of("@col", collection, "n", limit));
+        ImmutableList.Builder<Map<String, Object>> out = ImmutableList.builder();
+        cursor.forEach(m -> out.add((Map<String, Object>) m));
+        return out.build();
+    }
+
+    /** Cheap collection-metadata existence probe (no AQL) for the override collection. */
+    public boolean collectionExists(String database, String collection) {
+        return arango.db(database).collection(collection).exists();
+    }
+
+    /**
+     * Override docs for one table from the schema-override collection. LIMIT 2, not 1: a second row
+     * is how SchemaOverrideReader detects duplicate claims (spec M6-C §4.1).
+     */
+    @SuppressWarnings("unchecked")
+    public List<Map<String, Object>> fetchSchemaOverrideDocs(
+            String database, String schemaCollection, String table) {
+        ArangoCursor<Map> cursor =
+                arango.db(database)
+                        .query(
+                                "FOR d IN @@sc FILTER d.table == @t LIMIT 2 RETURN d",
+                                Map.class,
+                                Map.of("@sc", schemaCollection, "t", table));
         ImmutableList.Builder<Map<String, Object>> out = ImmutableList.builder();
         cursor.forEach(m -> out.add((Map<String, Object>) m));
         return out.build();
@@ -263,6 +295,23 @@ public class ArangoClient implements AutoCloseable {
             arango.createUser(username, password);
         }
         arango.db(db).grantAccess(username, Permissions.RO);
+    }
+
+    /**
+     * Test-only: grants (or revokes) a user's access to a single collection within {@code db},
+     * mirroring {@link #createReadOnlyUserForTest} but at collection granularity — the driver's
+     * typed API only exposes database-level grants.
+     */
+    public void setCollectionAccessForTest(
+            String username, String db, String collection, String grant) {
+        Request<Map<String, String>> req =
+                new Request.Builder<Map<String, String>>()
+                        .db("_system")
+                        .method(Request.Method.PUT)
+                        .path("/_api/user/" + username + "/database/" + db + "/" + collection)
+                        .body(Map.of("grant", grant))
+                        .build();
+        arango.execute(req, Map.class); // Map.class like every other raw-Request site here
     }
 
     public void createGraphForTest(

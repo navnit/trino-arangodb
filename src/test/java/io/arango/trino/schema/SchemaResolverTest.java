@@ -1,5 +1,10 @@
 package io.arango.trino.schema;
 
+import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.DoubleType.DOUBLE;
+import static io.trino.spi.type.VarcharType.VARCHAR;
+import static org.assertj.core.api.Assertions.assertThat;
+
 import io.arango.trino.ArangoConfig;
 import io.arango.trino.TestingArangoServer;
 import io.arango.trino.client.ArangoClient;
@@ -8,15 +13,9 @@ import io.arango.trino.schema.SchemaResolver.ArangoColumn;
 import io.arango.trino.type.TypeMapper;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.RowType;
-import org.junit.jupiter.api.*;
-
 import java.util.List;
 import java.util.Map;
-
-import static io.trino.spi.type.BigintType.BIGINT;
-import static io.trino.spi.type.DoubleType.DOUBLE;
-import static io.trino.spi.type.VarcharType.VARCHAR;
-import static org.assertj.core.api.Assertions.assertThat;
+import org.junit.jupiter.api.*;
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class SchemaResolverTest {
@@ -27,10 +26,21 @@ class SchemaResolverTest {
     @BeforeAll
     void setup() {
         server = new TestingArangoServer();
-        ArangoConfig config = new ArangoConfig().setHosts(server.hostPort())
-                .setUser("root").setPassword(server.rootPassword());
+        ArangoConfig config =
+                new ArangoConfig()
+                        .setHosts(server.hostPort())
+                        .setUser("root")
+                        .setPassword(server.rootPassword());
         client = new ArangoClient(config);
-        resolver = new SchemaResolver(client, new TypeMapper(), config);
+        resolver =
+                new SchemaResolver(
+                        client,
+                        new TypeMapper(),
+                        config,
+                        new SchemaOverrideReader(
+                                client,
+                                io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER,
+                                config));
 
         client.createDatabaseForTest("shop");
         client.createDocumentCollectionForTest("shop", "users");
@@ -41,14 +51,20 @@ class SchemaResolverTest {
         // nested-UNKNOWN fixtures: object field with an always-null inner attribute,
         // and array field with an always-null element.
         client.createDocumentCollectionForTest("shop", "profiles");
-        client.insertForTest("shop", "profiles", newMap(
-                "name", "ada",
-                "address", newMap("city", "NYC", "zip", null),
-                "tags", java.util.Arrays.asList((Object) null)));
-        client.insertForTest("shop", "profiles", newMap(
-                "name", "bob",
-                "address", newMap("city", "LA", "zip", null),
-                "tags", java.util.Arrays.asList((Object) null)));
+        client.insertForTest(
+                "shop",
+                "profiles",
+                newMap(
+                        "name", "ada",
+                        "address", newMap("city", "NYC", "zip", null),
+                        "tags", java.util.Arrays.asList((Object) null)));
+        client.insertForTest(
+                "shop",
+                "profiles",
+                newMap(
+                        "name", "bob",
+                        "address", newMap("city", "LA", "zip", null),
+                        "tags", java.util.Arrays.asList((Object) null)));
 
         // edge collection: _from/_to must be visible VARCHAR columns
         client.createEdgeCollectionForTest("shop", "orders");
@@ -68,50 +84,60 @@ class SchemaResolverTest {
     }
 
     @AfterAll
-    void teardown() { client.close(); server.close(); }
+    void teardown() {
+        client.close();
+        server.close();
+    }
 
     @Test
     void unionOfFieldsAcrossDocsAndNullColumnRetained() {
-        List<ArangoColumn> cols = resolver.resolveColumns("shop",
-                new CollectionInfo("users", false, false));
-        assertThat(cols).extracting(ArangoColumn::name)
+        List<ArangoColumn> cols =
+                resolver.resolveColumns("shop", new CollectionInfo("users", false, false));
+        assertThat(cols)
+                .extracting(ArangoColumn::name)
                 .contains("name", "age", "phone", "score"); // phone retained despite null
         assertThat(colType(cols, "name")).isEqualTo(VARCHAR);
         assertThat(colType(cols, "age")).isEqualTo(BIGINT);
         assertThat(colType(cols, "score")).isEqualTo(DOUBLE);
         // system attributes present and hidden
-        assertThat(cols).anySatisfy(c -> {
-            assertThat(c.name()).isEqualTo("_key");
-            assertThat(c.hidden()).isTrue();
-            assertThat(c.type()).isEqualTo(VARCHAR);
-        });
+        assertThat(cols)
+                .anySatisfy(
+                        c -> {
+                            assertThat(c.name()).isEqualTo("_key");
+                            assertThat(c.hidden()).isTrue();
+                            assertThat(c.type()).isEqualTo(VARCHAR);
+                        });
     }
 
     @Test
     void nestedUnknownInsideRowTypeFieldResolvesToVarchar() {
-        List<ArangoColumn> cols = resolver.resolveColumns("shop",
-                new CollectionInfo("profiles", false, false));
+        List<ArangoColumn> cols =
+                resolver.resolveColumns("shop", new CollectionInfo("profiles", false, false));
         io.trino.spi.type.Type addressType = colType(cols, "address");
         assertThat(addressType).isInstanceOf(RowType.class);
         RowType rowType = (RowType) addressType;
 
-        RowType.Field cityField = rowType.getFields().stream()
-                .filter(f -> f.getName().orElseThrow().equals("city"))
-                .findFirst().orElseThrow();
+        RowType.Field cityField =
+                rowType.getFields().stream()
+                        .filter(f -> f.getName().orElseThrow().equals("city"))
+                        .findFirst()
+                        .orElseThrow();
         assertThat(cityField.getType()).isEqualTo(VARCHAR);
 
         // "zip" was null in every sampled document: it must resolve to VARCHAR,
         // not be left as UNKNOWN buried inside the RowType.
-        RowType.Field zipField = rowType.getFields().stream()
-                .filter(f -> f.getName().orElseThrow().equals("zip"))
-                .findFirst().orElseThrow();
+        RowType.Field zipField =
+                rowType.getFields().stream()
+                        .filter(f -> f.getName().orElseThrow().equals("zip"))
+                        .findFirst()
+                        .orElseThrow();
         assertThat(zipField.getType()).isEqualTo(VARCHAR);
     }
 
     @Test
     void nestedUnknownInsideArrayTypeElementResolvesToVarchar() {
-        List<ArangoColumn> cols = resolver.resolveColumns("shop",
-                new CollectionInfo("profiles", false, false));
+        List<ArangoColumn> cols =
+                resolver.resolveColumns("shop", new CollectionInfo("profiles", false, false));
         io.trino.spi.type.Type tagsType = colType(cols, "tags");
         assertThat(tagsType).isInstanceOf(ArrayType.class);
         ArrayType arrayType = (ArrayType) tagsType;
@@ -123,27 +149,129 @@ class SchemaResolverTest {
 
     @Test
     void edgeCollectionExposesFromAndToAsVisibleVarchar() {
-        List<ArangoColumn> cols = resolver.resolveColumns("shop",
-                new CollectionInfo("orders", true, false));
-        assertThat(cols).anySatisfy(c -> {
-            assertThat(c.name()).isEqualTo("_from");
-            assertThat(c.hidden()).isFalse();
-            assertThat(c.type()).isEqualTo(VARCHAR);
-        });
-        assertThat(cols).anySatisfy(c -> {
-            assertThat(c.name()).isEqualTo("_to");
-            assertThat(c.hidden()).isFalse();
-            assertThat(c.type()).isEqualTo(VARCHAR);
-        });
+        List<ArangoColumn> cols =
+                resolver.resolveColumns("shop", new CollectionInfo("orders", true, false));
+        assertThat(cols)
+                .anySatisfy(
+                        c -> {
+                            assertThat(c.name()).isEqualTo("_from");
+                            assertThat(c.hidden()).isFalse();
+                            assertThat(c.type()).isEqualTo(VARCHAR);
+                        });
+        assertThat(cols)
+                .anySatisfy(
+                        c -> {
+                            assertThat(c.name()).isEqualTo("_to");
+                            assertThat(c.hidden()).isFalse();
+                            assertThat(c.type()).isEqualTo(VARCHAR);
+                        });
     }
 
     @Test
     void emptySampleYieldsOnlyHiddenSystemColumns() {
-        List<ArangoColumn> cols = resolver.resolveColumns("shop",
-                new CollectionInfo("empty_col", false, false));
-        assertThat(cols).extracting(ArangoColumn::name)
+        List<ArangoColumn> cols =
+                resolver.resolveColumns("shop", new CollectionInfo("empty_col", false, false));
+        assertThat(cols)
+                .extracting(ArangoColumn::name)
                 .containsExactlyInAnyOrder("_key", "_id", "_rev");
         assertThat(cols).allSatisfy(c -> assertThat(c.hidden()).isTrue());
+    }
+
+    @Test
+    void overridePresentMeansNoSampling() {
+        int[] samples = {0};
+        ArangoConfig config = new ArangoConfig().setHosts("localhost:1");
+        ArangoClient counting =
+                new ArangoClient(config) {
+                    @Override
+                    public boolean collectionExists(String db, String c) {
+                        return true;
+                    }
+
+                    @Override
+                    public List<Map<String, Object>> fetchSchemaOverrideDocs(
+                            String db, String sc, String t) {
+                        return List.of(
+                                Map.of(
+                                        "table",
+                                        t,
+                                        "fields",
+                                        List.of(Map.of("name", "total", "type", "decimal(12,2)"))));
+                    }
+
+                    @Override
+                    public List<Map<String, Object>> sampleDocuments(
+                            String db, String c, int limit, boolean random) {
+                        samples[0]++;
+                        return List.of();
+                    }
+                };
+        SchemaResolver r =
+                new SchemaResolver(
+                        counting,
+                        new TypeMapper(),
+                        config,
+                        new SchemaOverrideReader(
+                                counting,
+                                io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER,
+                                config));
+        List<ArangoColumn> cols =
+                r.resolveColumns("db", new CollectionInfo("orders", false, false));
+        assertThat(samples[0]).isZero();
+        // user column + the three hidden system attrs, in that order
+        assertThat(cols)
+                .extracting(ArangoColumn::name)
+                .containsExactly("total", "_key", "_id", "_rev");
+        assertThat(cols.get(0).type())
+                .isEqualTo(io.trino.spi.type.DecimalType.createDecimalType(12, 2));
+    }
+
+    @Test
+    void overrideOnEdgeCollectionAppendsFromTo() {
+        int[] samples = {0};
+        ArangoConfig config = new ArangoConfig().setHosts("localhost:1");
+        ArangoClient counting =
+                new ArangoClient(config) {
+                    @Override
+                    public boolean collectionExists(String db, String c) {
+                        return true;
+                    }
+
+                    @Override
+                    public List<Map<String, Object>> fetchSchemaOverrideDocs(
+                            String db, String sc, String t) {
+                        return List.of(
+                                Map.of(
+                                        "table",
+                                        t,
+                                        "fields",
+                                        List.of(Map.of("name", "total", "type", "decimal(12,2)"))));
+                    }
+
+                    @Override
+                    public List<Map<String, Object>> sampleDocuments(
+                            String db, String c, int limit, boolean random) {
+                        samples[0]++;
+                        return List.of();
+                    }
+                };
+        SchemaResolver r =
+                new SchemaResolver(
+                        counting,
+                        new TypeMapper(),
+                        config,
+                        new SchemaOverrideReader(
+                                counting,
+                                io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER,
+                                config));
+        List<ArangoColumn> cols = r.resolveColumns("db", new CollectionInfo("orders", true, false));
+        assertThat(samples[0]).isZero();
+        assertThat(cols)
+                .extracting(ArangoColumn::name)
+                .containsExactly("total", "_key", "_id", "_rev", "_from", "_to");
+        // edge attrs are VISIBLE varchar, exactly as on the sampling path
+        assertThat(cols.get(4).hidden()).isFalse();
+        assertThat(cols.get(5).hidden()).isFalse();
     }
 
     private static io.trino.spi.type.Type colType(List<ArangoColumn> cols, String name) {

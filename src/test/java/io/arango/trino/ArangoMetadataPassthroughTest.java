@@ -41,11 +41,19 @@ class ArangoMetadataPassthroughTest {
 
     private static ArangoMetadata metadata() {
         // the builder does not connect; any call that reaches ArangoDB would throw
-        ArangoClient client = new ArangoClient(new ArangoConfig());
+        ArangoConfig cfg = new ArangoConfig();
+        ArangoClient client = new ArangoClient(cfg);
         return new ArangoMetadata(
                 client,
-                new SchemaResolver(client, new TypeMapper(), new ArangoConfig()),
-                new ArangoConfig());
+                new SchemaResolver(
+                        client,
+                        new TypeMapper(),
+                        cfg,
+                        new io.arango.trino.schema.SchemaOverrideReader(
+                                client,
+                                io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER,
+                                cfg)),
+                cfg);
     }
 
     @Test

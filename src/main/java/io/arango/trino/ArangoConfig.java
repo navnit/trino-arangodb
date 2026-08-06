@@ -39,6 +39,7 @@ public class ArangoConfig {
     private boolean queryFunctionEnabled = true;
     private boolean statisticsEnabled = true;
     private Duration statisticsCacheTtl = new Duration(5, MINUTES);
+    private String schemaCollection = "trino_schema";
 
     @NotNull
     public String getHosts() {
@@ -218,6 +219,18 @@ public class ArangoConfig {
     @ConfigDescription("How long a collection row count is cached for planning")
     public ArangoConfig setStatisticsCacheTtl(Duration statisticsCacheTtl) {
         this.statisticsCacheTtl = statisticsCacheTtl;
+        return this;
+    }
+
+    @NotNull
+    public String getSchemaCollection() {
+        return schemaCollection;
+    }
+
+    @Config("arangodb.schema-collection")
+    @ConfigDescription("Per-database collection holding user-curated schema override documents")
+    public ArangoConfig setSchemaCollection(String schemaCollection) {
+        this.schemaCollection = schemaCollection;
         return this;
     }
 }

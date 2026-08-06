@@ -1,5 +1,9 @@
 package io.arango.trino.type;
 
+import static io.airlift.slice.Slices.utf8Slice;
+import static io.arango.trino.ArangoErrorCode.ARANGODB_TYPE_CONVERSION_ERROR;
+import static java.util.Objects.requireNonNull;
+
 import io.arango.trino.ArangoConfig;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.ArrayBlockBuilder;
@@ -8,31 +12,34 @@ import io.trino.spi.block.RowBlockBuilder;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.BigintType;
 import io.trino.spi.type.BooleanType;
+import io.trino.spi.type.DateTimeEncoding;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.Decimals;
 import io.trino.spi.type.DoubleType;
 import io.trino.spi.type.Int128;
 import io.trino.spi.type.RowType;
+import io.trino.spi.type.TimeZoneKey;
+import io.trino.spi.type.TimestampType;
+import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
-
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.List;
 import java.util.Map;
 
-import static io.airlift.slice.Slices.utf8Slice;
-import static io.arango.trino.ArangoErrorCode.ARANGODB_TYPE_CONVERSION_ERROR;
-import static java.util.Objects.requireNonNull;
-
 /**
  * TypeMapper's read-side dual: TypeMapper maps runtime values to Trino types at schema inference;
  * this class maps (inferred Trino type, runtime value) to block writes at read. Coercion is
  * type-exact and handled at the exact depth a mismatch occurs (M4 spec §3): LENIENT writes NULL for
- * the offending leaf only, STRICT raises naming the column and, for nested leaves, the path.
- * Not thread-safe: one instance per ArangoPageSource (single-threaded per split).
+ * the offending leaf only, STRICT raises naming the column and, for nested leaves, the path. Not
+ * thread-safe: one instance per ArangoPageSource (single-threaded per split).
  */
 public class ValueMaterializer {
     private final ArangoConfig.TypeCoercion coercion;
@@ -73,42 +80,82 @@ public class ValueMaterializer {
             type.writeSlice(out, utf8Slice(s));
             return;
         }
+        if (type instanceof TimestampType ts
+                && ts.getPrecision() == 3
+                && value instanceof String s) {
+            Long micros = localIsoToEpochMicros(s);
+            if (micros != null) {
+                ts.writeLong(
+                        out, micros); // short timestamp(3) encoding IS epoch MICROS (not millis)
+                return;
+            }
+        }
+        if (type instanceof TimestampWithTimeZoneType tz
+                && tz.getPrecision() == 3
+                && value instanceof String s) {
+            Long packed = offsetIsoToPackedMillis(s);
+            if (packed != null) {
+                tz.writeLong(out, packed);
+                return;
+            }
+        }
         if (type instanceof ArrayType arrayType && value instanceof List<?> list) {
-            ((ArrayBlockBuilder) out).buildEntry(elementBuilder -> {
-                int i = 0;
-                for (Object element : list) {
-                    if (strict) path.addLast("[" + i + "]");
-                    write(elementBuilder, arrayType.getElementType(), element, columnName);
-                    if (strict) path.removeLast();
-                    i++;
-                }
-            });
+            ((ArrayBlockBuilder) out)
+                    .buildEntry(
+                            elementBuilder -> {
+                                int i = 0;
+                                for (Object element : list) {
+                                    if (strict) path.addLast("[" + i + "]");
+                                    write(
+                                            elementBuilder,
+                                            arrayType.getElementType(),
+                                            element,
+                                            columnName);
+                                    if (strict) path.removeLast();
+                                    i++;
+                                }
+                            });
             return;
         }
         if (type instanceof RowType rowType && value instanceof Map<?, ?> map) {
-            ((RowBlockBuilder) out).buildEntry(fieldBuilders -> {
-                List<RowType.Field> fields = rowType.getFields();
-                for (int i = 0; i < fields.size(); i++) {
-                    RowType.Field field = fields.get(i);
-                    // Inference always names fields (RowType.field(name, type)) -- same
-                    // assumption TypeMapper.mergeRows makes. An absent key reads as null in
-                    // both modes: the union schema makes absence routine (spec decision 4).
-                    String name = field.getName().orElseThrow();
-                    if (strict) path.addLast("." + name);
-                    write(fieldBuilders.get(i), field.getType(), map.get(name), columnName);
-                    if (strict) path.removeLast();
-                }
-            });
+            ((RowBlockBuilder) out)
+                    .buildEntry(
+                            fieldBuilders -> {
+                                List<RowType.Field> fields = rowType.getFields();
+                                for (int i = 0; i < fields.size(); i++) {
+                                    RowType.Field field = fields.get(i);
+                                    // Inference always names fields (RowType.field(name, type)) --
+                                    // same
+                                    // assumption TypeMapper.mergeRows makes. An absent key reads as
+                                    // null in
+                                    // both modes: the union schema makes absence routine (spec
+                                    // decision 4).
+                                    String name = field.getName().orElseThrow();
+                                    if (strict) path.addLast("." + name);
+                                    write(
+                                            fieldBuilders.get(i),
+                                            field.getType(),
+                                            map.get(name),
+                                            columnName);
+                                    if (strict) path.removeLast();
+                                }
+                            });
             return;
         }
         if (type instanceof DecimalType decimalType) {
-            // TypeMapper only ever emits DECIMAL(38,0) -- always a long decimal (38 > 18), scale 0,
-            // so the unscaled value IS the value and the write path is Int128 via writeObject.
-            BigInteger unscaled = integralValueOf(value);
-            // Overflow gate BEFORE Int128.valueOf, which throws past 128 bits (spec review B1):
-            // an integral double >= 1e39 must be a mismatch (lenient NULL), not an ArithmeticException.
+            // Declared overrides emit arbitrary DECIMAL(p,s), not just DECIMAL(38,0) -- exact
+            // conversion to scale s, with a short/long write dispatch on precision (M6-C).
+            BigInteger unscaled =
+                    unscaledExact(value, decimalType.getPrecision(), decimalType.getScale());
+            // Overflow gate BEFORE writing (M4 review B1): an oversized value must be a
+            // mismatch (lenient NULL), not an ArithmeticException/Int128 throw.
             if (unscaled != null && !Decimals.overflows(unscaled, decimalType.getPrecision())) {
-                decimalType.writeObject(out, Int128.valueOf(unscaled));
+                if (decimalType.isShort()) {
+                    // p <= 18 => |unscaled| < 10^18 < 2^63: longValueExact cannot throw here.
+                    decimalType.writeLong(out, unscaled.longValueExact());
+                } else {
+                    decimalType.writeObject(out, Int128.valueOf(unscaled));
+                }
                 return;
             }
         }
@@ -117,17 +164,29 @@ public class ValueMaterializer {
 
     private void mismatch(BlockBuilder out, Type type, Object value, String columnName) {
         if (coercion == ArangoConfig.TypeCoercion.STRICT) {
-            throw new TrinoException(ARANGODB_TYPE_CONVERSION_ERROR, path.isEmpty()
-                    ? "Column '%s' expected %s but a document held %s of type %s"
-                            .formatted(columnName, type, truncateForError(value), value.getClass().getSimpleName())
-                    : "Column '%s': value at %s%s expected %s but a document held %s of type %s"
-                            .formatted(columnName, columnName, String.join("", path), type,
-                                    truncateForError(value), value.getClass().getSimpleName()));
+            throw new TrinoException(
+                    ARANGODB_TYPE_CONVERSION_ERROR,
+                    path.isEmpty()
+                            ? "Column '%s' expected %s but a document held %s of type %s"
+                                    .formatted(
+                                            columnName,
+                                            type,
+                                            truncateForError(value),
+                                            value.getClass().getSimpleName())
+                            : "Column '%s': value at %s%s expected %s but a document held %s of type %s"
+                                    .formatted(
+                                            columnName,
+                                            columnName,
+                                            String.join("", path),
+                                            type,
+                                            truncateForError(value),
+                                            value.getClass().getSimpleName()));
         }
         out.appendNull();
     }
 
-    // Cap an offending value's rendering so a multi-megabyte stored string doesn't land verbatim in the error.
+    // Cap an offending value's rendering so a multi-megabyte stored string doesn't land verbatim in
+    // the error.
     private static String truncateForError(Object value) {
         String s = String.valueOf(value);
         return s.length() <= 100 ? s : s.substring(0, 100) + "... (" + s.length() + " chars)";
@@ -136,7 +195,10 @@ public class ValueMaterializer {
     // A BIGINT column accepts an integer-valued number within signed 64-bit range. 42.0 is accepted
     // (reads as 42); 42.5 is a mismatch -- truncating it would disagree with a pushed FILTER.
     private static boolean isIntegralInLongRange(Object value) {
-        if (value instanceof Long || value instanceof Integer || value instanceof Short || value instanceof Byte) {
+        if (value instanceof Long
+                || value instanceof Integer
+                || value instanceof Short
+                || value instanceof Byte) {
             return true;
         }
         if (value instanceof Double d) {
@@ -152,28 +214,120 @@ public class ValueMaterializer {
         return false;
     }
 
-    // The integral value of a number, or null if it isn't one. Deliberately NOT bounded to signed
-    // 64-bit like isIntegralInLongRange: DECIMAL(38,0) exists precisely to hold uint64-range values
-    // (spec review B1 -- reusing the long-range bound would wrongly null e.g. 1e19). Magnitude is
-    // bounded by the caller's Decimals.overflows gate instead.
-    private static BigInteger integralValueOf(Object value) {
-        if (value instanceof Long || value instanceof Integer || value instanceof Short || value instanceof Byte) {
-            return BigInteger.valueOf(((Number) value).longValue());
-        }
-        if (value instanceof BigInteger bi) {
-            return bi;
-        }
-        if (value instanceof Double || value instanceof Float) {
+    /**
+     * Exact conversion to the column's scale, or null on any mismatch (M6-C spec §5.1). Doubles
+     * convert via new BigDecimal(d) -- the double's EXACT binary value, never BigDecimal.valueOf:
+     * valueOf's shortest round-trip repr would silently diverge from the "read exactly what's
+     * stored" invariant for integral doubles >= 2^53 (M4). Consequence: a stored double matches
+     * only when its exact binary value fits scale s (0.25 does at s=2; 12.34 does not) -- decimal
+     * STRINGS are the intended encoding (ArangoDB has no native decimal type). The two pre-gates
+     * below reject an oversized/inexact value before the setScale rescale: a stored string may
+     * carry an arbitrary exponent ("1E+500000000"), and setScale would materialize a hundreds-of-MB
+     * BigInteger before Decimals.overflows could reject it (review finding). The final setScale +
+     * catch is now a backstop for whatever the pre-gates don't cover, not the primary gate. This is
+     * the leaf support {@code io.arango.trino.schema.DeclaredTypes} (declared-override decimal(p,s)
+     * columns, not just TypeMapper-inferred DECIMAL(38,0)) relies on materializing through.
+     */
+    private static BigInteger unscaledExact(Object value, int precision, int scale) {
+        BigDecimal dec;
+        if (value instanceof Long
+                || value instanceof Integer
+                || value instanceof Short
+                || value instanceof Byte) {
+            dec = BigDecimal.valueOf(((Number) value).longValue());
+        } else if (value instanceof BigInteger bi) {
+            dec = new BigDecimal(bi);
+        } else if (value instanceof Double || value instanceof Float) {
             double d = ((Number) value).doubleValue();
-            if (!Double.isFinite(d) || d != Math.rint(d)) {
+            if (!Double.isFinite(d)) {
                 return null;
             }
-            // new BigDecimal(d), not BigDecimal.valueOf(d): valueOf uses the shortest round-trip
-            // string repr, so an integral double >= 2^53 (e.g. 2^63) would read back as a nearby
-            // "round" value rather than the exact integer the double represents. new BigDecimal(d)
-            // is the double's exact binary value -- the "read exactly what's stored" invariant.
-            return new BigDecimal(d).toBigIntegerExact();
+            dec = new BigDecimal(d);
+        } else if (value instanceof String s) {
+            try {
+                dec = new BigDecimal(s); // accepts 1E+2 and +x; rejects whitespace
+            } catch (NumberFormatException e) {
+                return null;
+            }
+        } else {
+            return null;
         }
-        return null;
+        // Integer digits alone exceed p => mismatch, without materializing the rescale. Excludes
+        // zero (signum guard) so a large-exponent zero literal ("0E+12") still converts, matching
+        // the pre-gate's "must not change any existing verdict" contract.
+        if (dec.signum() != 0 && (long) dec.precision() - dec.scale() > precision) {
+            return null;
+        }
+        // Inexact fit at the target scale, detected without dividing.
+        if (dec.scale() > scale && dec.stripTrailingZeros().scale() > scale) {
+            return null;
+        }
+        try {
+            return dec.setScale(scale).unscaledValue(); // no rounding: inexact fit => mismatch
+        } catch (ArithmeticException e) {
+            return null;
+        }
+    }
+
+    /**
+     * ISO_LOCAL_DATE_TIME string -> epoch micros, or null on any mismatch (M6-C spec §5.1):
+     * unparseable, finer-than-millis fractional seconds (never rounded — rounding would silently
+     * disagree with the declared precision), or epoch-micros long overflow (LocalDateTime.parse
+     * accepts +999999999-… years).
+     */
+    private static Long localIsoToEpochMicros(String s) {
+        LocalDateTime dateTime;
+        try {
+            dateTime = LocalDateTime.parse(s);
+        } catch (DateTimeParseException e) {
+            return null;
+        }
+        if (dateTime.getNano() % 1_000_000 != 0) {
+            return null;
+        }
+        try {
+            long micros = Math.multiplyExact(dateTime.toEpochSecond(ZoneOffset.UTC), 1_000_000L);
+            return Math.addExact(micros, dateTime.getNano() / 1_000L);
+        } catch (ArithmeticException e) {
+            return null;
+        }
+    }
+
+    /**
+     * ISO_OFFSET_DATE_TIME string -> packDateTimeWithZone(millis, offset key), or null on any
+     * mismatch: unparseable/local string, finer-than-millis, sub-minute or beyond-±14:00 offset
+     * (enforced by the EXPLICIT pre-checks below — TimeZoneKey.getTimeZoneKeyForOffset throws
+     * TrinoException, which is NOT an IllegalArgumentException, so the pre-checks are load-bearing,
+     * not defensive), epoch-milli overflow (toEpochMilli throws ArithmeticException), or 52-bit
+     * packed-millis overflow (pack throws IllegalArgumentException). The catch is the last line of
+     * the lenient no-throw guarantee: NO stored string may ever fail a query.
+     */
+    private static Long offsetIsoToPackedMillis(String s) {
+        OffsetDateTime dateTime;
+        try {
+            dateTime = OffsetDateTime.parse(s);
+        } catch (DateTimeParseException e) {
+            return null;
+        }
+        if (dateTime.getNano() % 1_000_000 != 0) {
+            return null;
+        }
+        int offsetSeconds = dateTime.getOffset().getTotalSeconds();
+        if (offsetSeconds % 60 != 0) {
+            return null;
+        }
+        int offsetMinutes = offsetSeconds / 60;
+        if (offsetMinutes < -14 * 60 || offsetMinutes > 14 * 60) {
+            return null;
+        }
+        try {
+            return DateTimeEncoding.packDateTimeWithZone(
+                    dateTime.toInstant().toEpochMilli(),
+                    TimeZoneKey.getTimeZoneKeyForOffset(offsetMinutes));
+        } catch (RuntimeException e) {
+            // ArithmeticException (toEpochMilli), IllegalArgumentException (pack overflow), and
+            // any engine-side throw the pre-checks missed: all become a per-cell mismatch.
+            return null;
+        }
     }
 }

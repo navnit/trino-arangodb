@@ -12,6 +12,7 @@ import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.MaterializedResult;
 import io.trino.testing.QueryRunner;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
@@ -112,6 +113,28 @@ class ArangoConnectorPushdownTest extends AbstractTestQueryFramework {
             seed.createDocumentCollectionForTest("shop", "bigint53");
             seed.insertForTest("shop", "bigint53", Map.of("age", 100L));
             seed.insertForTest("shop", "bigint53", Map.of("age", 9_007_199_254_740_993L)); // 2^53+1
+
+            // Declared-type fixture (M6-C task 9): a schema-override doc types "amount" DECIMAL
+            // and "at" TIMESTAMP, neither of which isPushable's BOOLEAN/VARCHAR/BIGINT/DOUBLE
+            // allowlist admits. Used to pin that filter pushdown auto-declines both, while an
+            // ordinary VARCHAR column on the same override-driven table still pushes.
+            seed.createDocumentCollectionForTest("shop", "declared");
+            seed.insertForTest(
+                    "shop",
+                    "declared",
+                    Map.of("tag", "x", "amount", "12.34", "at", "2026-01-02T03:04:05.678"));
+            seed.createDocumentCollectionForTest("shop", "trino_schema");
+            seed.insertForTest(
+                    "shop",
+                    "trino_schema",
+                    Map.of(
+                            "table",
+                            "declared",
+                            "fields",
+                            List.of(
+                                    Map.of("name", "tag", "type", "varchar"),
+                                    Map.of("name", "amount", "type", "decimal(12,2)"),
+                                    Map.of("name", "at", "type", "timestamp(3)"))));
         }
 
         QueryRunner queryRunner =
@@ -396,5 +419,39 @@ class ArangoConnectorPushdownTest extends AbstractTestQueryFramework {
         assertThat(query("SELECT big FROM arangoskew.shop.bigskew WHERE big > 5"))
                 .matches("VALUES (BIGINT '10'), (BIGINT '20')")
                 .isNotFullyPushedDown(FilterNode.class);
+    }
+
+    @Test
+    void timestampFilterOnDeclaredColumnIsResidualButStillCorrect() {
+        // isPushable's discrete-set/range allowlist covers only BOOLEAN/VARCHAR/BIGINT/DOUBLE, so
+        // it declines a declared-type TimestampType column (from the trino_schema override)
+        // regardless of the operator, leaving the predicate residual. Trino applies it itself
+        // post-read.
+        assertThat(
+                        query(
+                                "SELECT tag FROM arango.shop.declared WHERE at > TIMESTAMP"
+                                        + " '2026-01-01 00:00:00'"))
+                .matches("VALUES VARCHAR 'x'")
+                .isNotFullyPushedDown(FilterNode.class);
+    }
+
+    @Test
+    void decimalEqualityFilterOnDeclaredColumnIsResidualButStillCorrect() {
+        // Same allowlist gap as above, exercised for equality on a declared DecimalType column
+        // instead of a range predicate on TimestampType -- a different call site inside
+        // isPushable's discrete-set branch, still declined by the same type allowlist.
+        assertThat(query("SELECT tag FROM arango.shop.declared WHERE amount = DECIMAL '12.34'"))
+                .matches("VALUES VARCHAR 'x'")
+                .isNotFullyPushedDown(FilterNode.class);
+    }
+
+    @Test
+    void declaredTableStillPushesOrdinaryVarcharEquality() {
+        // Positive control: the override doc itself doesn't change how a VARCHAR column on the
+        // same table pushes down -- "declared" carrying a DECIMAL and a TIMESTAMP column doesn't
+        // taint tag's own eligibility.
+        assertThat(query("SELECT tag FROM arango.shop.declared WHERE tag = 'x'"))
+                .matches("VALUES VARCHAR 'x'")
+                .isFullyPushedDown();
     }
 }
