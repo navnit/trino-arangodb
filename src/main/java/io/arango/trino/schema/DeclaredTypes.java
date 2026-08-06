@@ -22,8 +22,10 @@ import java.util.Set;
 /**
  * Parses and admits declared type strings from schema-override docs (M6-C spec §5). Parsing is
  * TypeManager.fromSqlType (never a second hand-rolled grammar); admission is a recursive allowlist
- * of exactly what ValueMaterializer can materialize. Alias spellings that resolve to an admitted
- * Type (bare "timestamp"/"decimal", "without time zone") are admitted by design.
+ * of exactly what the M6-C spec §5 defines. ValueMaterializer's corresponding leaf-materialization
+ * support for decimal(p,s) and timestamp variants lands as part of the same M6-C milestone. Alias
+ * spellings that resolve to an admitted Type (bare "timestamp"/"decimal", "without time zone") are
+ * admitted by design.
  */
 final class DeclaredTypes {
     static final String SUPPORTED =
