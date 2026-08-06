@@ -1,5 +1,14 @@
 package io.arango.trino.type;
 
+import static io.arango.trino.ArangoConfig.TypeCoercion.LENIENT;
+import static io.arango.trino.ArangoConfig.TypeCoercion.STRICT;
+import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.BooleanType.BOOLEAN;
+import static io.trino.spi.type.DoubleType.DOUBLE;
+import static io.trino.spi.type.VarcharType.VARCHAR;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
 import io.arango.trino.ArangoConfig;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
@@ -10,28 +19,20 @@ import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.Int128;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
-import org.junit.jupiter.api.Test;
-
 import java.math.BigInteger;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
-
-import static io.arango.trino.ArangoConfig.TypeCoercion.LENIENT;
-import static io.arango.trino.ArangoConfig.TypeCoercion.STRICT;
-import static io.trino.spi.type.BigintType.BIGINT;
-import static io.trino.spi.type.BooleanType.BOOLEAN;
-import static io.trino.spi.type.DoubleType.DOUBLE;
-import static io.trino.spi.type.VarcharType.VARCHAR;
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import org.junit.jupiter.api.Test;
 
 class ValueMaterializerTest {
 
-    private static final RowType ADDRESS = RowType.rowType(
-            RowType.field("city", VARCHAR), RowType.field("zip", BIGINT));
+    private static final RowType ADDRESS =
+            RowType.rowType(RowType.field("city", VARCHAR), RowType.field("zip", BIGINT));
 
     private static final DecimalType DEC38 = DecimalType.createDecimalType(38, 0);
+    private static final DecimalType DEC12_2 = DecimalType.createDecimalType(12, 2);
+    private static final DecimalType DEC20_4 = DecimalType.createDecimalType(20, 4);
 
     // Writes one value through ValueMaterializer and returns the built single-position block.
     static Block materialize(Type type, Object value, ArangoConfig.TypeCoercion coercion) {
@@ -44,11 +45,15 @@ class ValueMaterializerTest {
     void scalarParityWithM1AppendValue() {
         assertThat(BOOLEAN.getBoolean(materialize(BOOLEAN, true, LENIENT), 0)).isTrue();
         assertThat(BIGINT.getLong(materialize(BIGINT, 42L, LENIENT), 0)).isEqualTo(42L);
-        assertThat(BIGINT.getLong(materialize(BIGINT, 42.0, LENIENT), 0)).isEqualTo(42L); // fraction-free double accepted
-        assertThat(BIGINT.getLong(materialize(BIGINT, BigInteger.valueOf(7), LENIENT), 0)).isEqualTo(7L);
+        assertThat(BIGINT.getLong(materialize(BIGINT, 42.0, LENIENT), 0))
+                .isEqualTo(42L); // fraction-free double accepted
+        assertThat(BIGINT.getLong(materialize(BIGINT, BigInteger.valueOf(7), LENIENT), 0))
+                .isEqualTo(7L);
         assertThat(DOUBLE.getDouble(materialize(DOUBLE, 2.5, LENIENT), 0)).isEqualTo(2.5);
-        assertThat(DOUBLE.getDouble(materialize(DOUBLE, 3L, LENIENT), 0)).isEqualTo(3.0); // any Number under DOUBLE
-        assertThat(VARCHAR.getSlice(materialize(VARCHAR, "hi", LENIENT), 0).toStringUtf8()).isEqualTo("hi");
+        assertThat(DOUBLE.getDouble(materialize(DOUBLE, 3L, LENIENT), 0))
+                .isEqualTo(3.0); // any Number under DOUBLE
+        assertThat(VARCHAR.getSlice(materialize(VARCHAR, "hi", LENIENT), 0).toStringUtf8())
+                .isEqualTo("hi");
     }
 
     @Test
@@ -59,19 +64,23 @@ class ValueMaterializerTest {
 
     @Test
     void scalarMismatchIsNullUnderLenient() {
-        assertThat(materialize(BIGINT, 42.5, LENIENT).isNull(0)).isTrue();      // genuine fraction
-        assertThat(materialize(VARCHAR, 42L, LENIENT).isNull(0)).isTrue();      // number under VARCHAR
-        assertThat(materialize(BOOLEAN, "true", LENIENT).isNull(0)).isTrue();   // string under BOOLEAN
+        assertThat(materialize(BIGINT, 42.5, LENIENT).isNull(0)).isTrue(); // genuine fraction
+        assertThat(materialize(VARCHAR, 42L, LENIENT).isNull(0)).isTrue(); // number under VARCHAR
+        assertThat(materialize(BOOLEAN, "true", LENIENT).isNull(0))
+                .isTrue(); // string under BOOLEAN
     }
 
     @Test
     void scalarMismatchRaisesUnderStrictWithM1MessageShape() {
         assertThatThrownBy(() -> materialize(VARCHAR, 42L, STRICT))
-                .isInstanceOfSatisfying(TrinoException.class, e -> {
-                    assertThat(e.getErrorCode().getName()).isEqualTo("ARANGODB_TYPE_CONVERSION_ERROR");
-                    // top-level mismatch keeps today's message shape: no path suffix
-                    assertThat(e.getMessage()).startsWith("Column 'col' expected");
-                });
+                .isInstanceOfSatisfying(
+                        TrinoException.class,
+                        e -> {
+                            assertThat(e.getErrorCode().getName())
+                                    .isEqualTo("ARANGODB_TYPE_CONVERSION_ERROR");
+                            // top-level mismatch keeps today's message shape: no path suffix
+                            assertThat(e.getMessage()).startsWith("Column 'col' expected");
+                        });
     }
 
     @Test
@@ -87,7 +96,8 @@ class ValueMaterializerTest {
     @Test
     void emptyArrayMaterializesEmpty() {
         ArrayType type = new ArrayType(VARCHAR);
-        assertThat(type.getObject(materialize(type, List.of(), LENIENT), 0).getPositionCount()).isZero();
+        assertThat(type.getObject(materialize(type, List.of(), LENIENT), 0).getPositionCount())
+                .isZero();
         assertThat(materialize(type, List.of(), LENIENT).isNull(0)).isFalse();
     }
 
@@ -95,7 +105,9 @@ class ValueMaterializerTest {
     void nestedArrayMaterializesRecursively() {
         ArrayType inner = new ArrayType(BIGINT);
         ArrayType type = new ArrayType(inner);
-        Block outer = type.getObject(materialize(type, List.of(List.of(1L), List.of(2L, 3L)), LENIENT), 0);
+        Block outer =
+                type.getObject(
+                        materialize(type, List.of(List.of(1L), List.of(2L, 3L)), LENIENT), 0);
         assertThat(outer.getPositionCount()).isEqualTo(2);
         Block second = inner.getObject(outer, 1);
         assertThat(BIGINT.getLong(second, 1)).isEqualTo(3L);
@@ -106,7 +118,7 @@ class ValueMaterializerTest {
         ArrayType type = new ArrayType(BIGINT);
         Block elements = type.getObject(materialize(type, List.of(1L, "oops", 3L), LENIENT), 0);
         assertThat(BIGINT.getLong(elements, 0)).isEqualTo(1L);
-        assertThat(elements.isNull(1)).isTrue();   // leaf-level null (spec §3, user choice A)
+        assertThat(elements.isNull(1)).isTrue(); // leaf-level null (spec §3, user choice A)
         assertThat(BIGINT.getLong(elements, 2)).isEqualTo(3L);
     }
 
@@ -115,7 +127,8 @@ class ValueMaterializerTest {
         ArrayType type = new ArrayType(BIGINT);
         List<Object> withNull = Arrays.asList(1L, null, 3L);
         assertThat(type.getObject(materialize(type, withNull, LENIENT), 0).isNull(1)).isTrue();
-        assertThat(type.getObject(materialize(type, withNull, STRICT), 0).isNull(1)).isTrue(); // no raise
+        assertThat(type.getObject(materialize(type, withNull, STRICT), 0).isNull(1))
+                .isTrue(); // no raise
     }
 
     @Test
@@ -123,7 +136,8 @@ class ValueMaterializerTest {
         ArrayType type = new ArrayType(BIGINT);
         assertThat(materialize(type, "not-a-list", LENIENT).isNull(0)).isTrue();
         assertThatThrownBy(() -> materialize(type, "not-a-list", STRICT))
-                .isInstanceOfSatisfying(TrinoException.class,
+                .isInstanceOfSatisfying(
+                        TrinoException.class,
                         e -> assertThat(e.getMessage()).startsWith("Column 'col' expected"));
     }
 
@@ -131,16 +145,22 @@ class ValueMaterializerTest {
     void strictNestedMismatchNamesThePath() {
         ArrayType type = new ArrayType(BIGINT);
         assertThatThrownBy(() -> materialize(type, List.of(1L, "oops"), STRICT))
-                .isInstanceOfSatisfying(TrinoException.class, e -> {
-                    assertThat(e.getErrorCode().getName()).isEqualTo("ARANGODB_TYPE_CONVERSION_ERROR");
-                    assertThat(e.getMessage()).contains("value at col[1]");
-                });
+                .isInstanceOfSatisfying(
+                        TrinoException.class,
+                        e -> {
+                            assertThat(e.getErrorCode().getName())
+                                    .isEqualTo("ARANGODB_TYPE_CONVERSION_ERROR");
+                            assertThat(e.getMessage()).contains("value at col[1]");
+                        });
     }
 
     @Test
     void rowMaterializesFieldsInRowTypeOrder() {
-        SqlRow row = ADDRESS.getObject(materialize(ADDRESS, Map.of("zip", 10115L, "city", "berlin"), LENIENT), 0);
-        assertThat(VARCHAR.getSlice(row.getRawFieldBlock(0), row.getRawIndex()).toStringUtf8()).isEqualTo("berlin");
+        SqlRow row =
+                ADDRESS.getObject(
+                        materialize(ADDRESS, Map.of("zip", 10115L, "city", "berlin"), LENIENT), 0);
+        assertThat(VARCHAR.getSlice(row.getRawFieldBlock(0), row.getRawIndex()).toStringUtf8())
+                .isEqualTo("berlin");
         assertThat(BIGINT.getLong(row.getRawFieldBlock(1), row.getRawIndex())).isEqualTo(10115L);
     }
 
@@ -155,8 +175,13 @@ class ValueMaterializerTest {
 
     @Test
     void extraDocumentKeysAreIgnored() {
-        SqlRow row = ADDRESS.getObject(materialize(ADDRESS,
-                Map.of("city", "berlin", "zip", 10115L, "unsampled", true), LENIENT), 0);
+        SqlRow row =
+                ADDRESS.getObject(
+                        materialize(
+                                ADDRESS,
+                                Map.of("city", "berlin", "zip", 10115L, "unsampled", true),
+                                LENIENT),
+                        0);
         assertThat(row.getFieldCount()).isEqualTo(2);
     }
 
@@ -171,9 +196,11 @@ class ValueMaterializerTest {
         RowType root = RowType.rowType(RowType.field("items", new ArrayType(leaf)));
         Block block = materialize(root, Map.of("items", List.of(Map.of("v", 7L))), LENIENT);
         SqlRow rootRow = root.getObject(block, 0);
-        Block items = new ArrayType(leaf).getObject(rootRow.getRawFieldBlock(0), rootRow.getRawIndex());
+        Block items =
+                new ArrayType(leaf).getObject(rootRow.getRawFieldBlock(0), rootRow.getRawIndex());
         SqlRow leafRow = leaf.getObject(items, 0);
-        assertThat(BIGINT.getLong(leafRow.getRawFieldBlock(0), leafRow.getRawIndex())).isEqualTo(7L);
+        assertThat(BIGINT.getLong(leafRow.getRawFieldBlock(0), leafRow.getRawIndex()))
+                .isEqualTo(7L);
     }
 
     @Test
@@ -182,8 +209,11 @@ class ValueMaterializerTest {
         ArrayType type = new ArrayType(leaf);
         List<Object> value = List.of(Map.of("b", 1L), Map.of("b", "oops"), Map.of("b", 3L));
         assertThatThrownBy(() -> materialize(type, value, STRICT))
-                .isInstanceOfSatisfying(TrinoException.class,
-                        e -> assertThat(e.getMessage()).contains("value at col[1].b")); // spec §7 shape
+                .isInstanceOfSatisfying(
+                        TrinoException.class,
+                        e ->
+                                assertThat(e.getMessage())
+                                        .contains("value at col[1].b")); // spec §7 shape
     }
 
     @Test
@@ -218,23 +248,46 @@ class ValueMaterializerTest {
 
     @Test
     void integralDoubleBeyondPrecisionIsCleanMismatchNotCrash() {
-        // Spec review B1 mode A: 1e39 overflows DECIMAL(38,0); must be NULL, not ArithmeticException.
+        // Spec review B1 mode A: 1e39 overflows DECIMAL(38,0); must be NULL, not
+        // ArithmeticException.
         assertThat(materialize(DEC38, 1e39, LENIENT).isNull(0)).isTrue();
-        assertThatThrownBy(() -> materialize(DEC38, 1e39, STRICT)).isInstanceOf(TrinoException.class);
+        assertThatThrownBy(() -> materialize(DEC38, 1e39, STRICT))
+                .isInstanceOf(TrinoException.class);
     }
 
     @Test
     void fractionalAndOversizedValuesAreMismatches() {
         assertThat(materialize(DEC38, 42.5, LENIENT).isNull(0)).isTrue();
-        assertThat(materialize(DEC38, BigInteger.TEN.pow(39), LENIENT).isNull(0)).isTrue(); // >38 digits
-        assertThat(materialize(DEC38, "42", LENIENT).isNull(0)).isTrue();                   // non-number
+        assertThat(materialize(DEC38, BigInteger.TEN.pow(39), LENIENT).isNull(0))
+                .isTrue(); // >38 digits
+        // Strings are the real decimal path -- ArangoDB has no decimal type (M6-C spec §5.1) --
+        // so a numeric string now converts exactly instead of being a mismatch.
+        assertThat((Int128) DEC38.getObject(materialize(DEC38, "42", LENIENT), 0))
+                .isEqualTo(Int128.valueOf(42));
+    }
+
+    @Test
+    void nonFiniteDoublesUnderDecimalAreMismatchesNotExceptions() {
+        // The finiteness guard in unscaledExact must reject these before `new BigDecimal(d)`,
+        // which throws an unchecked NumberFormatException on Infinity/NaN -- not the
+        // ArithmeticException the setScale try/catch guards against.
+        assertThat(materialize(DEC38, Double.POSITIVE_INFINITY, LENIENT).isNull(0)).isTrue();
+        assertThat(materialize(DEC38, Double.NEGATIVE_INFINITY, LENIENT).isNull(0)).isTrue();
+        assertThat(materialize(DEC38, Double.NaN, LENIENT).isNull(0)).isTrue();
+        assertThatThrownBy(() -> materialize(DEC38, Double.POSITIVE_INFINITY, STRICT))
+                .isInstanceOf(TrinoException.class);
     }
 
     @Test
     void nestedDecimalLeavesMaterializeThroughTheSameDispatch() {
         ArrayType arrayOfDec = new ArrayType(DEC38);
-        Block elements = arrayOfDec.getObject(
-                materialize(arrayOfDec, List.of(1L, new BigInteger("18446744073709551615")), LENIENT), 0);
+        Block elements =
+                arrayOfDec.getObject(
+                        materialize(
+                                arrayOfDec,
+                                List.of(1L, new BigInteger("18446744073709551615")),
+                                LENIENT),
+                        0);
         assertThat((Int128) DEC38.getObject(elements, 1))
                 .isEqualTo(Int128.valueOf(new BigInteger("18446744073709551615")));
 
@@ -242,5 +295,102 @@ class ValueMaterializerTest {
         SqlRow row = rowWithDec.getObject(materialize(rowWithDec, Map.of("x", 5L), LENIENT), 0);
         assertThat((Int128) DEC38.getObject(row.getRawFieldBlock(0), row.getRawIndex()))
                 .isEqualTo(Int128.valueOf(5));
+    }
+
+    @Test
+    void shortDecimalStringConvertsExactly() {
+        // DEC12_2 is a SHORT decimal (precision 12 <= 18) -- the new writeLong path.
+        assertThat(DEC12_2.getLong(materialize(DEC12_2, "12.34", LENIENT), 0)).isEqualTo(1234L);
+        assertThat(DEC12_2.getLong(materialize(DEC12_2, "1E+2", LENIENT), 0))
+                .isEqualTo(10000L); // scientific notation accepted
+        assertThat(DEC12_2.getLong(materialize(DEC12_2, "+12.34", LENIENT), 0))
+                .isEqualTo(1234L); // leading + accepted
+    }
+
+    @Test
+    void shortDecimalWhitespaceAndNonNumericStringsAreMismatches() {
+        assertThat(materialize(DEC12_2, " 12.34", LENIENT).isNull(0))
+                .isTrue(); // whitespace rejected by new BigDecimal
+        assertThatThrownBy(() -> materialize(DEC12_2, " 12.34", STRICT))
+                .isInstanceOfSatisfying(
+                        TrinoException.class,
+                        e ->
+                                assertThat(e.getErrorCode().getName())
+                                        .isEqualTo("ARANGODB_TYPE_CONVERSION_ERROR"));
+
+        assertThat(materialize(DEC12_2, "abc", LENIENT).isNull(0)).isTrue();
+        assertThatThrownBy(() -> materialize(DEC12_2, "abc", STRICT))
+                .isInstanceOfSatisfying(
+                        TrinoException.class,
+                        e ->
+                                assertThat(e.getErrorCode().getName())
+                                        .isEqualTo("ARANGODB_TYPE_CONVERSION_ERROR"));
+    }
+
+    @Test
+    void shortDecimalDoubleExactBinaryFitConverts() {
+        assertThat(DEC12_2.getLong(materialize(DEC12_2, 0.25, LENIENT), 0))
+                .isEqualTo(25L); // exact binary fit at s=2
+    }
+
+    @Test
+    void shortDecimalDoubleInexactBinaryFitIsMismatch() {
+        // 12.34's exact binary value is 12.339999999999999857891452847979962825775146484375,
+        // which does not fit scale 2 exactly -- decimal STRINGS are the intended encoding.
+        assertThat(materialize(DEC12_2, 12.34, LENIENT).isNull(0)).isTrue();
+        assertThatThrownBy(() -> materialize(DEC12_2, 12.34, STRICT))
+                .isInstanceOfSatisfying(
+                        TrinoException.class,
+                        e ->
+                                assertThat(e.getErrorCode().getName())
+                                        .isEqualTo("ARANGODB_TYPE_CONVERSION_ERROR"));
+    }
+
+    @Test
+    void shortDecimalLongConvertsWithZeroFraction() {
+        assertThat(DEC12_2.getLong(materialize(DEC12_2, 42L, LENIENT), 0))
+                .isEqualTo(4200L); // 42.00
+    }
+
+    @Test
+    void shortDecimalPrecisionOverflowIsMismatch() {
+        // 12 digits + scale 2 = 14 unscaled digits > p=12.
+        assertThat(materialize(DEC12_2, 123456789012L, LENIENT).isNull(0)).isTrue();
+        assertThatThrownBy(() -> materialize(DEC12_2, 123456789012L, STRICT))
+                .isInstanceOfSatisfying(
+                        TrinoException.class,
+                        e ->
+                                assertThat(e.getErrorCode().getName())
+                                        .isEqualTo("ARANGODB_TYPE_CONVERSION_ERROR"));
+    }
+
+    @Test
+    void booleanUnderDecimalColumnIsStructuralMismatch() {
+        assertThat(materialize(DEC12_2, true, LENIENT).isNull(0)).isTrue();
+        assertThatThrownBy(() -> materialize(DEC12_2, true, STRICT))
+                .isInstanceOfSatisfying(
+                        TrinoException.class,
+                        e ->
+                                assertThat(e.getErrorCode().getName())
+                                        .isEqualTo("ARANGODB_TYPE_CONVERSION_ERROR"));
+    }
+
+    @Test
+    void longDecimalFractionalScaleStringConvertsExactly() {
+        // DEC20_4 is a LONG decimal (precision 20 > 18) -- the pre-existing Int128 write path,
+        // now reached with a non-zero scale.
+        assertThat(
+                        (Int128)
+                                DEC20_4.getObject(
+                                        materialize(DEC20_4, "12345678901234.5678", LENIENT), 0))
+                .isEqualTo(Int128.valueOf(new BigInteger("123456789012345678")));
+    }
+
+    @Test
+    void nullUnderShortDecimalIsNullInBothModes() {
+        // Stored null is never a mismatch (spec §3) -- pins the same rule at the new short-decimal
+        // leaf.
+        assertThat(materialize(DEC12_2, null, LENIENT).isNull(0)).isTrue();
+        assertThat(materialize(DEC12_2, null, STRICT).isNull(0)).isTrue();
     }
 }
