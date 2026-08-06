@@ -12,15 +12,23 @@ import io.trino.spi.block.RowBlockBuilder;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.BigintType;
 import io.trino.spi.type.BooleanType;
+import io.trino.spi.type.DateTimeEncoding;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.Decimals;
 import io.trino.spi.type.DoubleType;
 import io.trino.spi.type.Int128;
 import io.trino.spi.type.RowType;
+import io.trino.spi.type.TimeZoneKey;
+import io.trino.spi.type.TimestampType;
+import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.List;
@@ -71,6 +79,25 @@ public class ValueMaterializer {
         if (type instanceof VarcharType && value instanceof String s) {
             type.writeSlice(out, utf8Slice(s));
             return;
+        }
+        if (type instanceof TimestampType ts
+                && ts.getPrecision() == 3
+                && value instanceof String s) {
+            Long micros = localIsoToEpochMicros(s);
+            if (micros != null) {
+                ts.writeLong(
+                        out, micros); // short timestamp(3) encoding IS epoch MICROS (not millis)
+                return;
+            }
+        }
+        if (type instanceof TimestampWithTimeZoneType tz
+                && tz.getPrecision() == 3
+                && value instanceof String s) {
+            Long packed = offsetIsoToPackedMillis(s);
+            if (packed != null) {
+                tz.writeLong(out, packed);
+                return;
+            }
         }
         if (type instanceof ArrayType arrayType && value instanceof List<?> list) {
             ((ArrayBlockBuilder) out)
@@ -225,6 +252,68 @@ public class ValueMaterializer {
         try {
             return dec.setScale(scale).unscaledValue(); // no rounding: inexact fit => mismatch
         } catch (ArithmeticException e) {
+            return null;
+        }
+    }
+
+    /**
+     * ISO_LOCAL_DATE_TIME string -> epoch micros, or null on any mismatch (M6-C spec §5.1):
+     * unparseable, finer-than-millis fractional seconds (never rounded — rounding would silently
+     * disagree with the declared precision), or epoch-micros long overflow (LocalDateTime.parse
+     * accepts +999999999-… years).
+     */
+    private static Long localIsoToEpochMicros(String s) {
+        LocalDateTime dateTime;
+        try {
+            dateTime = LocalDateTime.parse(s);
+        } catch (DateTimeParseException e) {
+            return null;
+        }
+        if (dateTime.getNano() % 1_000_000 != 0) {
+            return null;
+        }
+        try {
+            long micros = Math.multiplyExact(dateTime.toEpochSecond(ZoneOffset.UTC), 1_000_000L);
+            return Math.addExact(micros, dateTime.getNano() / 1_000L);
+        } catch (ArithmeticException e) {
+            return null;
+        }
+    }
+
+    /**
+     * ISO_OFFSET_DATE_TIME string -> packDateTimeWithZone(millis, offset key), or null on any
+     * mismatch: unparseable/local string, finer-than-millis, sub-minute or beyond-±14:00 offset
+     * (enforced by the EXPLICIT pre-checks below — TimeZoneKey.getTimeZoneKeyForOffset throws
+     * TrinoException, which is NOT an IllegalArgumentException, so the pre-checks are load-bearing,
+     * not defensive), epoch-milli overflow (toEpochMilli throws ArithmeticException), or 52-bit
+     * packed-millis overflow (pack throws IllegalArgumentException). The catch is the last line of
+     * the lenient no-throw guarantee: NO stored string may ever fail a query.
+     */
+    private static Long offsetIsoToPackedMillis(String s) {
+        OffsetDateTime dateTime;
+        try {
+            dateTime = OffsetDateTime.parse(s);
+        } catch (DateTimeParseException e) {
+            return null;
+        }
+        if (dateTime.getNano() % 1_000_000 != 0) {
+            return null;
+        }
+        int offsetSeconds = dateTime.getOffset().getTotalSeconds();
+        if (offsetSeconds % 60 != 0) {
+            return null;
+        }
+        int offsetMinutes = offsetSeconds / 60;
+        if (offsetMinutes < -14 * 60 || offsetMinutes > 14 * 60) {
+            return null;
+        }
+        try {
+            return DateTimeEncoding.packDateTimeWithZone(
+                    dateTime.toInstant().toEpochMilli(),
+                    TimeZoneKey.getTimeZoneKeyForOffset(offsetMinutes));
+        } catch (RuntimeException e) {
+            // ArithmeticException (toEpochMilli), IllegalArgumentException (pack overflow), and
+            // any engine-side throw the pre-checks missed: all become a per-cell mismatch.
             return null;
         }
     }

@@ -5,6 +5,8 @@ import static io.arango.trino.ArangoConfig.TypeCoercion.STRICT;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DoubleType.DOUBLE;
+import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
+import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -15,11 +17,16 @@ import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.SqlRow;
 import io.trino.spi.type.ArrayType;
+import io.trino.spi.type.DateTimeEncoding;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.Int128;
 import io.trino.spi.type.RowType;
+import io.trino.spi.type.TimeZoneKey;
 import io.trino.spi.type.Type;
 import java.math.BigInteger;
+import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -392,5 +399,196 @@ class ValueMaterializerTest {
         // leaf.
         assertThat(materialize(DEC12_2, null, LENIENT).isNull(0)).isTrue();
         assertThat(materialize(DEC12_2, null, STRICT).isNull(0)).isTrue();
+    }
+
+    @Test
+    void timestampMillisAcceptsIsoLocalDateTimeString() {
+        long expectedMicros =
+                LocalDateTime.of(2026, 8, 5, 12, 34, 56, 789_000_000).toEpochSecond(ZoneOffset.UTC)
+                                * 1_000_000L
+                        + 789_000L;
+        assertThat(
+                        TIMESTAMP_MILLIS.getLong(
+                                materialize(TIMESTAMP_MILLIS, "2026-08-05T12:34:56.789", LENIENT),
+                                0))
+                .isEqualTo(expectedMicros);
+    }
+
+    @Test
+    void timestampMillisAcceptsLowercaseTAndMissingSeconds() {
+        // Parser surface, pinned (M6-C spec §5.1): ISO_LOCAL_DATE_TIME parses case-insensitively
+        // and tolerates an omitted seconds field.
+        long expectedMicros =
+                LocalDateTime.of(2026, 8, 5, 12, 34).toEpochSecond(ZoneOffset.UTC) * 1_000_000L;
+        assertThat(
+                        TIMESTAMP_MILLIS.getLong(
+                                materialize(TIMESTAMP_MILLIS, "2026-08-05t12:34", LENIENT), 0))
+                .isEqualTo(expectedMicros);
+    }
+
+    @Test
+    void timestampMillisMismatchesUnderLenient() {
+        assertThat(
+                        materialize(TIMESTAMP_MILLIS, "2026-08-05 12:34:56", LENIENT)
+                                .isNull(0)) // space separator
+                .isTrue();
+        assertThat(
+                        materialize(TIMESTAMP_MILLIS, "2026-08-05T12:34:56.123456", LENIENT)
+                                .isNull(0)) // finer than millis, never rounded
+                .isTrue();
+        assertThat(
+                        materialize(TIMESTAMP_MILLIS, "2026-08-05T12:34:56+02:00", LENIENT)
+                                .isNull(0)) // offset belongs to the tz type
+                .isTrue();
+        assertThat(
+                        materialize(TIMESTAMP_MILLIS, "+999999999-12-31T23:59:59", LENIENT)
+                                .isNull(0)) // epoch-micros long overflow, not an exception
+                .isTrue();
+    }
+
+    @Test
+    void timestampMillisMismatchesRaiseUnderStrict() {
+        assertTimestampMillisMismatchRaises("2026-08-05 12:34:56"); // space separator
+        assertTimestampMillisMismatchRaises(
+                "2026-08-05T12:34:56.123456"); // finer than millis, never rounded
+        assertTimestampMillisMismatchRaises(
+                "2026-08-05T12:34:56+02:00"); // offset belongs to the tz type
+        assertTimestampMillisMismatchRaises(
+                "+999999999-12-31T23:59:59"); // epoch-micros long overflow, not an exception
+    }
+
+    private static void assertTimestampMillisMismatchRaises(Object value) {
+        assertThatThrownBy(() -> materialize(TIMESTAMP_MILLIS, value, STRICT))
+                .isInstanceOfSatisfying(
+                        TrinoException.class,
+                        e ->
+                                assertThat(e.getErrorCode().getName())
+                                        .isEqualTo("ARANGODB_TYPE_CONVERSION_ERROR"));
+    }
+
+    @Test
+    void timestampMillisNeverMatchesANumber() {
+        // Epoch-millis Number encoding is deliberately deferred (M6-C spec §5.1) -- numbers never
+        // match the timestamp branch, string is the only accepted representation.
+        assertThat(materialize(TIMESTAMP_MILLIS, 1722854096789L, LENIENT).isNull(0)).isTrue();
+        assertTimestampMillisMismatchRaises(1722854096789L);
+    }
+
+    @Test
+    void timestampWithTimeZoneAcceptsOffsetString() {
+        String iso = "2026-08-05T12:34:56.789+05:30";
+        long expectedMillis = OffsetDateTime.parse(iso).toInstant().toEpochMilli();
+        Block block = materialize(TIMESTAMP_TZ_MILLIS, iso, LENIENT);
+        long packed = TIMESTAMP_TZ_MILLIS.getLong(block, 0);
+        assertThat(DateTimeEncoding.unpackMillisUtc(packed)).isEqualTo(expectedMillis);
+        assertThat(DateTimeEncoding.unpackZoneKey(packed))
+                .isEqualTo(TimeZoneKey.getTimeZoneKeyForOffset(330));
+    }
+
+    @Test
+    void timestampWithTimeZoneAcceptsUtcZ() {
+        String iso = "2026-08-05T12:34:56.789Z";
+        long expectedMillis = OffsetDateTime.parse(iso).toInstant().toEpochMilli();
+        Block block = materialize(TIMESTAMP_TZ_MILLIS, iso, LENIENT);
+        long packed = TIMESTAMP_TZ_MILLIS.getLong(block, 0);
+        assertThat(DateTimeEncoding.unpackMillisUtc(packed)).isEqualTo(expectedMillis);
+        assertThat(DateTimeEncoding.unpackZoneKey(packed)).isEqualTo(TimeZoneKey.UTC_KEY);
+    }
+
+    @Test
+    void timestampWithTimeZoneMismatchesUnderLenient() {
+        assertThat(
+                        materialize(TIMESTAMP_TZ_MILLIS, "2026-08-05T12:34:56.789", LENIENT)
+                                .isNull(0)) // local string under tz type
+                .isTrue();
+        assertThat(
+                        materialize(TIMESTAMP_TZ_MILLIS, "2026-08-05T12:34:56+05:30:15", LENIENT)
+                                .isNull(0)) // sub-minute offset: TimeZoneKey would throw
+                .isTrue();
+        assertThat(
+                        materialize(TIMESTAMP_TZ_MILLIS, "2026-08-05T12:34:56+16:00", LENIENT)
+                                .isNull(0)) // parser allows +-18:00; Trino only +-14:00
+                .isTrue();
+        assertThat(
+                        materialize(TIMESTAMP_TZ_MILLIS, "2026-08-05T12:34:56.1234+01:00", LENIENT)
+                                .isNull(0)) // finer than millis
+                .isTrue();
+    }
+
+    @Test
+    void timestampWithTimeZoneMismatchesRaiseUnderStrict() {
+        assertTimestampTzMismatchRaises("2026-08-05T12:34:56.789"); // local string under tz type
+        assertTimestampTzMismatchRaises(
+                "2026-08-05T12:34:56+05:30:15"); // sub-minute offset: TimeZoneKey would throw
+        assertTimestampTzMismatchRaises(
+                "2026-08-05T12:34:56+16:00"); // parser allows +-18:00; Trino only +-14:00
+        assertTimestampTzMismatchRaises("2026-08-05T12:34:56.1234+01:00"); // finer than millis
+    }
+
+    private static void assertTimestampTzMismatchRaises(String value) {
+        assertThatThrownBy(() -> materialize(TIMESTAMP_TZ_MILLIS, value, STRICT))
+                .isInstanceOfSatisfying(
+                        TrinoException.class,
+                        e ->
+                                assertThat(e.getErrorCode().getName())
+                                        .isEqualTo("ARANGODB_TYPE_CONVERSION_ERROR"));
+    }
+
+    @Test
+    void timestampWithTimeZonePackedMillisOverflowIsMismatchNotException() {
+        // 52-bit packed-millis overflow via pack's IllegalArgumentException -- toEpochMilli itself
+        // succeeds here (year 300000 fits in a signed long epoch-milli).
+        assertThat(materialize(TIMESTAMP_TZ_MILLIS, "+300000-01-01T00:00:00Z", LENIENT).isNull(0))
+                .isTrue();
+        assertTimestampTzMismatchRaises("+300000-01-01T00:00:00Z");
+    }
+
+    @Test
+    void timestampWithTimeZoneEpochMillisOverflowIsMismatchNotException() {
+        // Epoch-millis ~3.15e19 > Long.MAX_VALUE: toEpochMilli's ArithmeticException arm,
+        // exercised.
+        assertThat(
+                        materialize(TIMESTAMP_TZ_MILLIS, "+999999999-12-31T23:59:59Z", LENIENT)
+                                .isNull(0))
+                .isTrue();
+        assertTimestampTzMismatchRaises("+999999999-12-31T23:59:59Z");
+    }
+
+    @Test
+    void nullUnderBothTimestampTypesIsNullInBothModes() {
+        // Stored null is never a mismatch (spec §3) -- pins the same rule at the new timestamp
+        // leaves.
+        assertThat(materialize(TIMESTAMP_MILLIS, null, LENIENT).isNull(0)).isTrue();
+        assertThat(materialize(TIMESTAMP_MILLIS, null, STRICT).isNull(0)).isTrue();
+        assertThat(materialize(TIMESTAMP_TZ_MILLIS, null, LENIENT).isNull(0)).isTrue();
+        assertThat(materialize(TIMESTAMP_TZ_MILLIS, null, STRICT).isNull(0)).isTrue();
+    }
+
+    @Test
+    void arrayOfTimestampMillisMismatchNullsOnlyThatElementUnderLenient() {
+        ArrayType type = new ArrayType(TIMESTAMP_MILLIS);
+        Block elements =
+                type.getObject(
+                        materialize(type, List.of("2026-08-05T12:00:00", "bad"), LENIENT), 0);
+        assertThat(elements.isNull(0)).isFalse();
+        assertThat(elements.isNull(1)).isTrue();
+    }
+
+    @Test
+    void arrayOfTimestampMillisMismatchNamesThePathUnderStrict() {
+        ArrayType type = new ArrayType(TIMESTAMP_MILLIS);
+        List<Object> value = List.of("2026-08-05T12:00:00", "bad");
+        assertThatThrownBy(() -> materialize(type, value, STRICT))
+                .isInstanceOfSatisfying(
+                        TrinoException.class,
+                        e -> assertThat(e.getMessage()).contains("value at col[1]"));
+    }
+
+    @Test
+    void rowWithDecimalFieldMaterializesThroughTheNewLeafRecursion() {
+        RowType amountRow = RowType.rowType(RowType.field("amount", DEC12_2));
+        SqlRow row =
+                amountRow.getObject(materialize(amountRow, Map.of("amount", "12.34"), LENIENT), 0);
+        assertThat(DEC12_2.getLong(row.getRawFieldBlock(0), row.getRawIndex())).isEqualTo(1234L);
     }
 }
