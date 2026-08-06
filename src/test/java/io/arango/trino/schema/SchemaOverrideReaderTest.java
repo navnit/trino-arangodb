@@ -1,5 +1,6 @@
 package io.arango.trino.schema;
 
+import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -142,6 +143,11 @@ class SchemaOverrideReaderTest {
         Map<String, Object> extraTop = doc(List.of(field("a", "varchar")));
         extraTop.put("tabel", "orders");
         assertDocRejected(extraTop, "tabel");
+        // explicit "hidden": null must be rejected, not silently defaulted like an absent key
+        // (Map.of cannot hold a null value, so build the field map by hand like "hiden" above).
+        Map<String, Object> nullHidden = new HashMap<>(field("a", "varchar"));
+        nullHidden.put("hidden", null);
+        assertDocRejected(doc(List.of(nullHidden)), "hidden");
     }
 
     @Test
@@ -189,6 +195,7 @@ class SchemaOverrideReaderTest {
                 };
         assertThatThrownBy(() -> reader(broken).read("db", "orders"))
                 .isInstanceOf(TrinoException.class)
+                .hasFieldOrPropertyWithValue("errorCode", GENERIC_INTERNAL_ERROR.toErrorCode())
                 .hasMessageContaining("trino_schema");
     }
 

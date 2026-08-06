@@ -106,7 +106,12 @@ Merging an integer-typed and a floating-point occurrence of the same field **wid
 and (since M4) selecting their **values** materializes them recursively: under
 `arangodb.type-coercion=lenient` a type-mismatched leaf reads as `NULL` (only that element/field,
 not the whole row), while `strict` raises `ARANGODB_TYPE_CONVERSION_ERROR` with a path to the
-offending leaf (e.g. `col[2].b`).
+offending leaf (e.g. `col[2].b`). As of M6-C, this also applies to a sampled `DECIMAL(38,0)`
+column, not just a declared `decimal(p,s)` override — decimal materialization is one
+type-dispatched code path regardless of how the column's type was determined, so a numeric
+string now converts too (exact fit at the column's scale only; under `strict` this loosens what
+was previously an error into a successful parse). See "Decimals should be stored as strings"
+under [Schema overrides](#schema-overrides) for the exact-fit rule.
 
 ## Schema overrides
 

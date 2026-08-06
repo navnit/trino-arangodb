@@ -10,6 +10,7 @@ import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 import io.arango.trino.ArangoConfig;
 import io.trino.spi.TrinoException;
@@ -24,6 +25,7 @@ import io.trino.spi.type.RowType;
 import io.trino.spi.type.TimeZoneKey;
 import io.trino.spi.type.Type;
 import java.math.BigInteger;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -338,6 +340,26 @@ class ValueMaterializerTest {
     void shortDecimalDoubleExactBinaryFitConverts() {
         assertThat(DEC12_2.getLong(materialize(DEC12_2, 0.25, LENIENT), 0))
                 .isEqualTo(25L); // exact binary fit at s=2
+    }
+
+    @Test
+    void shortDecimalIntegralDoubleConvertsAtNonZeroScale() {
+        // Spec §5.1: an integral double matches at any scale s, not just s=0 -- 42.0 has no
+        // fractional binary content to fail the exact-fit gate.
+        assertThat(DEC12_2.getLong(materialize(DEC12_2, 42.0, LENIENT), 0)).isEqualTo(4200L);
+    }
+
+    @Test
+    void hugeExponentDecimalStringIsCheapMismatchNotSlowRescale() {
+        // Review finding: new BigDecimal(s) accepts an arbitrary exponent; without the magnitude
+        // pre-gate in unscaledExact, setScale would materialize a ~hundreds-of-MB BigInteger
+        // before Decimals.overflows could reject it ("1E+2000000".setScale(2) measured ~148ms /
+        // 6.6Mbit; "1E+900000000" would be far larger). The pre-gate must make this a cheap
+        // mismatch -- a plain isNull assertion would pass slowly even without the fix, so the
+        // timeout is what actually pins the fast path.
+        assertTimeoutPreemptively(
+                Duration.ofSeconds(1),
+                () -> assertThat(materialize(DEC12_2, "1E+900000000", LENIENT).isNull(0)).isTrue());
     }
 
     @Test

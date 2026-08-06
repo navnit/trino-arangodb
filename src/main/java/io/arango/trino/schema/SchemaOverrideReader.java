@@ -144,8 +144,10 @@ public class SchemaOverrideReader {
                 throw error(table, "field '" + name + "' needs a string 'type'");
             }
             Type type = DeclaredTypes.parse(typeManager, table, name, typeString);
+            // containsKey first: an explicitly-present "hidden": null must be rejected, not
+            // silently treated the same as an absent key (which legitimately defaults false).
             Object hidden = field.get("hidden");
-            if (hidden != null && !(hidden instanceof Boolean)) {
+            if (field.containsKey("hidden") && !(hidden instanceof Boolean)) {
                 throw error(table, "field '" + name + "': 'hidden' must be a boolean");
             }
             out.add(new ArangoColumn(name, type, Boolean.TRUE.equals(hidden)));

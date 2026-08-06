@@ -145,7 +145,8 @@ public class ValueMaterializer {
         if (type instanceof DecimalType decimalType) {
             // Declared overrides emit arbitrary DECIMAL(p,s), not just DECIMAL(38,0) -- exact
             // conversion to scale s, with a short/long write dispatch on precision (M6-C).
-            BigInteger unscaled = unscaledExact(value, decimalType.getScale());
+            BigInteger unscaled =
+                    unscaledExact(value, decimalType.getPrecision(), decimalType.getScale());
             // Overflow gate BEFORE writing (M4 review B1): an oversized value must be a
             // mismatch (lenient NULL), not an ArithmeticException/Int128 throw.
             if (unscaled != null && !Decimals.overflows(unscaled, decimalType.getPrecision())) {
@@ -219,13 +220,15 @@ public class ValueMaterializer {
      * valueOf's shortest round-trip repr would silently diverge from the "read exactly what's
      * stored" invariant for integral doubles >= 2^53 (M4). Consequence: a stored double matches
      * only when its exact binary value fits scale s (0.25 does at s=2; 12.34 does not) -- decimal
-     * STRINGS are the intended encoding (ArangoDB has no native decimal type). setScale with no
-     * rounding is both the fractional gate (s=0 keeps DECIMAL(38,0)'s integral-only rule) and the
-     * exact-fit gate. This is the leaf support {@code io.arango.trino.schema.DeclaredTypes}
-     * (declared-override decimal(p,s) columns, not just TypeMapper-inferred DECIMAL(38,0)) relies
-     * on materializing through.
+     * STRINGS are the intended encoding (ArangoDB has no native decimal type). The two pre-gates
+     * below reject an oversized/inexact value before the setScale rescale: a stored string may
+     * carry an arbitrary exponent ("1E+500000000"), and setScale would materialize a hundreds-of-MB
+     * BigInteger before Decimals.overflows could reject it (review finding). The final setScale +
+     * catch is now a backstop for whatever the pre-gates don't cover, not the primary gate. This is
+     * the leaf support {@code io.arango.trino.schema.DeclaredTypes} (declared-override decimal(p,s)
+     * columns, not just TypeMapper-inferred DECIMAL(38,0)) relies on materializing through.
      */
-    private static BigInteger unscaledExact(Object value, int scale) {
+    private static BigInteger unscaledExact(Object value, int precision, int scale) {
         BigDecimal dec;
         if (value instanceof Long
                 || value instanceof Integer
@@ -247,6 +250,16 @@ public class ValueMaterializer {
                 return null;
             }
         } else {
+            return null;
+        }
+        // Integer digits alone exceed p => mismatch, without materializing the rescale. Excludes
+        // zero (signum guard) so a large-exponent zero literal ("0E+12") still converts, matching
+        // the pre-gate's "must not change any existing verdict" contract.
+        if (dec.signum() != 0 && (long) dec.precision() - dec.scale() > precision) {
+            return null;
+        }
+        // Inexact fit at the target scale, detected without dividing.
+        if (dec.scale() > scale && dec.stripTrailingZeros().scale() > scale) {
             return null;
         }
         try {
