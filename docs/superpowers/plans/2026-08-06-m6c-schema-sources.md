@@ -15,7 +15,9 @@
 - Maven needs `source ~/.sdkman/bin/sdkman-init.sh` first if `mvn` is not found. Build/test requires JDK 25 and a **running Docker daemon** (Testcontainers).
 - Run a single test class: `mvn test -Dtest=ClassName`; single method: `mvn test -Dtest=ClassName#method`.
 - Before every commit: `mvn spotless:apply` (ratcheted google-java-format, AOSP 4-space), then `git add` only your files.
-- Conventional commits (`feat:` / `test:` / `docs:`); every commit message ends with the two `Co-Authored-By`-free lines used by this repo's history (plain message is fine).
+- Conventional commits (`feat:` / `test:` / `docs:`) with a plain subject line; the harness appends its standard co-author trailer.
+- After each task's tests pass, also run `mvn checkstyle:check` on any task that CREATES a file — new files are gate-enforced (no star imports, etc.), and a violation must surface in the task that wrote the file, not five tasks later.
+- Spotless is ratcheted per FILE: editing a file that predates the formatter (`ValueMaterializer.java`, `ValueMaterializerTest.java`, `SchemaResolver.java`) makes `spotless:apply` reflow the WHOLE file (import order, comment wrapping). A large formatting diff on those files is expected, not a mistake — verify the *semantic* diff is only your change before committing.
 - New code must pass `mvn checkstyle:check` and `mvn compile spotbugs:check` (allowlisted new files are enforced).
 - Error-code doctrine: user-authored input errors → `ARANGODB_SCHEMA_ERROR`; server/unknown failures → `GENERIC_INTERNAL_ERROR`; per-cell read mismatches → existing coercion policy (`lenient` NULL / `strict` `ARANGODB_TYPE_CONVERSION_ERROR`). Under `lenient`, **no stored value may ever fail a query** — every conversion is bounds-checked to a mismatch, never an escaping exception.
 - `java.time` semantics note: `LocalDateTime.toEpochSecond(ZoneOffset.UTC)` is total seconds with nanos excluded; `OffsetDateTime.toInstant().toEpochMilli()` throws `ArithmeticException` on overflow — that throw is *relied on* in Task 7.
@@ -70,13 +72,14 @@ public ArangoConfig setSchemaCollection(String schemaCollection) {
 - Produces: `ArangoClient.collectionExists(String database, String collection)` → `boolean`; `ArangoClient.fetchSchemaOverrideDocs(String database, String schemaCollection, String table)` → `List<Map<String, Object>>` (raw docs, `LIMIT 2`); test helper `ArangoClient.setCollectionAccessForTest(String username, String db, String collection, String grant)`.
 - Consumes: nothing new.
 
-- [ ] **Step 1: Write the failing tests.** New container-backed class (model the boilerplate on `SchemaResolverTest`: `@TestInstance(PER_CLASS)`, `TestingArangoServer` in `@BeforeAll`, `server.close()`-equivalent teardown as that class does):
+- [ ] **Step 1: Write the failing tests.** New container-backed class (model the boilerplate on `SchemaResolverTest`: `@TestInstance(PER_CLASS)`, `TestingArangoServer` in `@BeforeAll`, `server.close()`-equivalent teardown as that class does; note the *assumption-test* precedent this mirrors, `AqlSemanticsAssumptionsTest`, lives in the `aql` test package — this new class correctly lives in `schema`, do not go hunting for it there):
 
 ```java
 package io.arango.trino.schema;
 
-// imports per SchemaResolverTest, plus com.arangodb.ArangoDBException,
-// org.assertj.core.api.Assertions.assertThatThrownBy / catchThrowableOfType
+// imports per SchemaResolverTest, plus:
+//   com.arangodb.ArangoDBException
+//   org.assertj.core.api.Assertions   (for catchThrowableOfType)
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class AqlSchemaOverrideAssumptionsTest {
@@ -100,8 +103,8 @@ class AqlSchemaOverrideAssumptionsTest {
         // Spec §4.5: the @@sc BIND-PARAMETER shape was never exercised by M6-B's
         // literal-reference queries; pin that it really is 1203, not some plan-time code.
         ArangoDBException e = Assertions.catchThrowableOfType(
-                () -> client.fetchSchemaOverrideDocs("ovr", "no_such_collection", "orders"),
-                ArangoDBException.class);
+                ArangoDBException.class,
+                () -> client.fetchSchemaOverrideDocs("ovr", "no_such_collection", "orders"));
         assertThat(e.getErrorNum()).isEqualTo(1203);
     }
 
@@ -128,12 +131,14 @@ class AqlSchemaOverrideAssumptionsTest {
         try (ArangoClient restricted = new ArangoClient(new ArangoConfig()
                 .setHosts(server.hostPort()).setUser("limited").setPassword("pw"))) {
             ArangoDBException e = Assertions.catchThrowableOfType(
-                    () -> restricted.fetchSchemaOverrideDocs("ovr", "trino_schema", "orders"),
-                    ArangoDBException.class);
+                    ArangoDBException.class,
+                    () -> restricted.fetchSchemaOverrideDocs("ovr", "trino_schema", "orders"));
             // First run: temporarily print e.getErrorNum()/e.getResponseCode(), then pin
-            // the observed values here AND use the same constants in Task 4's isForbidden.
+            // the observed values in ArangoClient.ERROR_NUM_FORBIDDEN / HTTP_FORBIDDEN
+            // (Step 3) and assert against those constants here. Task 4's isForbidden reads
+            // the SAME constants, so the observation travels to it by name, not by lore.
             // Expected observation: errorNum 11 ("forbidden") and/or HTTP 403.
-            assertThat(e.getResponseCode()).isEqualTo(403);
+            assertThat(e.getResponseCode()).isEqualTo(ArangoClient.HTTP_FORBIDDEN);
         }
     }
 }
@@ -144,6 +149,15 @@ class AqlSchemaOverrideAssumptionsTest {
 - [ ] **Step 3: Implement in `ArangoClient`** (production methods near `sampleDocuments`; test helper in the test-only section):
 
 ```java
+/**
+ * ArangoDB "forbidden" error shape for a collection the user lacks a grant on, observed
+ * and pinned by AqlSchemaOverrideAssumptionsTest (M6-C spec §4.5). SchemaOverrideReader
+ * keys its tailored diagnostic off these — update them ONLY with a new observation.
+ */
+public static final int ERROR_NUM_FORBIDDEN = 11;
+
+public static final int HTTP_FORBIDDEN = 403;
+
 /** Cheap collection-metadata existence probe (no AQL) for the override collection. */
 public boolean collectionExists(String database, String collection) {
     return arango.db(database).collection(collection).exists();
@@ -177,11 +191,11 @@ public void setCollectionAccessForTest(
             .path("/_api/user/" + username + "/database/" + db + "/" + collection)
             .body(Map.of("grant", grant))
             .build();
-    arango.execute(req, Void.class);
+    arango.execute(req, Map.class); // Map.class like every other raw-Request site here
 }
 ```
 
-- [ ] **Step 4: Run — observe, then pin.** `mvn test -Dtest=AqlSchemaOverrideAssumptionsTest`. If `forbiddenCollectionErrorShape` fails on the pinned value, replace with the observed `errorNum`/`responseCode` (record BOTH in an assertion + comment) — Task 4 depends on these constants. All four tests must pass.
+- [ ] **Step 4: Run — observe, then pin.** `mvn test -Dtest=AqlSchemaOverrideAssumptionsTest`. If `forbiddenCollectionErrorShape` fails on the pinned value, update `ArangoClient.ERROR_NUM_FORBIDDEN`/`HTTP_FORBIDDEN` to the observed values (they are the durable artifact Task 4 consumes). All four tests must pass. Then `mvn checkstyle:check`.
 
 - [ ] **Step 5: Commit.** `feat: ArangoClient override-collection fetch + existence probe; pin 1203/forbidden shapes (M6-C)`.
 
@@ -209,8 +223,19 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.arango.trino.ArangoErrorCode;
 import io.trino.spi.TrinoException;
-import io.trino.spi.type.*;
+import io.trino.spi.type.ArrayType;
+import io.trino.spi.type.BigintType;
+import io.trino.spi.type.BooleanType;
+import io.trino.spi.type.DecimalType;
+import io.trino.spi.type.DoubleType;
+import io.trino.spi.type.RowType;
+import io.trino.spi.type.TimestampType;
+import io.trino.spi.type.TimestampWithTimeZoneType;
+import io.trino.spi.type.Type;
+import io.trino.spi.type.VarcharType;
 import org.junit.jupiter.api.Test;
+// NO star imports: checkstyle's AvoidStarImport is enforced on new files
+// (includeTestSourceDirectory=true; suppressions cover only grandfathered files).
 
 class DeclaredTypesTest {
     private static Type parse(String s) {
@@ -402,7 +427,7 @@ final class DeclaredTypes {
 }
 ```
 
-- [ ] **Step 4: Run to verify it passes.** `mvn test -Dtest=DeclaredTypesTest` — PASS. If a rejection message assertion fails on wording, align the test's `messagePart` with the implementation (the *code* and *classification* are the contract, not exact prose).
+- [ ] **Step 4: Run to verify it passes.** `mvn test -Dtest=DeclaredTypesTest` — PASS. If a rejection message assertion fails on wording, align the test's `messagePart` with the implementation (the *code* and *classification* are the contract, not exact prose). Then `mvn checkstyle:check`.
 
 - [ ] **Step 5: Commit.** `feat: ARANGODB_SCHEMA_ERROR + DeclaredTypes recursive allowlist (M6-C)`.
 
@@ -616,25 +641,21 @@ class SchemaOverrideReaderTest {
         assertThat(probes[0]).isEqualTo(2); // one per database within the TTL
     }
 
-    /** Build a real ArangoDBException carrying an errorNum/responseCode. */
+    /**
+     * Fabricate an ArangoDBException carrying an errorNum/responseCode. The driver class and
+     * both getters are non-final; the (String, Integer) constructor already surfaces the
+     * response code via getResponseCode(), so only getErrorNum needs overriding.
+     */
     private static ArangoDBException arangoError(int errorNum, int responseCode) {
-        return new ArangoDBException(
-                new com.arangodb.entity.ErrorEntity(), responseCode) {
+        return new ArangoDBException("test error " + errorNum, responseCode) {
             @Override
             public Integer getErrorNum() {
                 return errorNum;
-            }
-
-            @Override
-            public Integer getResponseCode() {
-                return responseCode;
             }
         };
     }
 }
 ```
-
-Note: if `ErrorEntity`/`ArangoDBException` construction differs in driver 7.13 (constructor visibility), use whatever construction `ArangoMetadataTest`'s error-path doubles already use for 1228 — copy that pattern exactly; the contract under test is `getErrorNum()`/`getResponseCode()`, not the construction.
 
 - [ ] **Step 2: Run to verify failure.** `mvn test -Dtest=SchemaOverrideReaderTest` — compile error, `SchemaOverrideReader` undefined.
 
@@ -677,9 +698,6 @@ public class SchemaOverrideReader {
     private static final Logger log = Logger.get(SchemaOverrideReader.class);
     private static final Set<String> DOC_KEYS = Set.of("table", "fields", "_key", "_id", "_rev");
     private static final Set<String> FIELD_KEYS = Set.of("name", "type", "hidden");
-    // ArangoDB "forbidden" shape pinned by AqlSchemaOverrideAssumptionsTest.
-    private static final int ERROR_FORBIDDEN = 11;
-    private static final int HTTP_FORBIDDEN = 403;
     private static final int ERROR_COLLECTION_NOT_FOUND = 1203;
 
     private final ArangoClient client;
@@ -731,6 +749,9 @@ public class SchemaOverrideReader {
     }
 
     private List<ArangoColumn> parse(String table, Map<String, Object> doc) {
+        // 'table' itself needs no presence/type validation here: the AQL FILTER
+        // d.table == @t (string bind) already guarantees it equals the requested name;
+        // re-checking would be dead code (recorded decision, spec §3).
         for (String key : doc.keySet()) {
             if (!DOC_KEYS.contains(key)) {
                 throw error(table, "unrecognized key '" + key + "'"
@@ -791,8 +812,11 @@ public class SchemaOverrideReader {
     }
 
     private static boolean isForbidden(ArangoDBException e) {
-        return (e.getErrorNum() != null && e.getErrorNum() == ERROR_FORBIDDEN)
-                || (e.getResponseCode() != null && e.getResponseCode() == HTTP_FORBIDDEN);
+        // Constants live on ArangoClient, pinned against a real server by
+        // AqlSchemaOverrideAssumptionsTest (Task 2) — never redeclare them here.
+        return (e.getErrorNum() != null && e.getErrorNum() == ArangoClient.ERROR_NUM_FORBIDDEN)
+                || (e.getResponseCode() != null
+                        && e.getResponseCode() == ArangoClient.HTTP_FORBIDDEN);
     }
 
     private TrinoException error(String table, String reason) {
@@ -803,9 +827,7 @@ public class SchemaOverrideReader {
 }
 ```
 
-If Task 2's observed forbidden shape differed from `11`/`403`, use the observed constants here.
-
-- [ ] **Step 4: Run to verify it passes.** `mvn test -Dtest=SchemaOverrideReaderTest` — PASS. Also `mvn test -Dtest=DeclaredTypesTest` (unchanged, still green).
+- [ ] **Step 4: Run to verify it passes.** `mvn test -Dtest=SchemaOverrideReaderTest` — PASS. Also `mvn test -Dtest=DeclaredTypesTest` (unchanged, still green). Then `mvn checkstyle:check`.
 
 - [ ] **Step 5: Commit.** `feat: SchemaOverrideReader — strict doc validation, probe cache, error translation (M6-C)`.
 
@@ -818,10 +840,13 @@ If Task 2's observed forbidden shape differed from `11`/`403`, use the observed 
 - Modify: `src/main/java/io/arango/trino/ArangoModule.java`
 - Modify: `src/main/java/io/arango/trino/schema/SchemaResolver.java`
 - Test: `src/test/java/io/arango/trino/schema/SchemaResolverTest.java`
+- Modify (constructor call sites — the change does NOT compile without them):
+  `src/test/java/io/arango/trino/ArangoMetadataPassthroughTest.java:47`,
+  `src/test/java/io/arango/trino/AggregationWireQueryTest.java:87`
 
 **Interfaces:**
 - Consumes: `SchemaOverrideReader.read` (Task 4).
-- Produces: `SchemaResolver` constructor becomes `(ArangoClient, TypeMapper, ArangoConfig, SchemaOverrideReader)`; `ArangoModule` constructor becomes `ArangoModule(TypeManager typeManager)`. Every later task sees the same resolver behavior; the container e2e (Task 9) proves the Guice graph.
+- Produces: `SchemaResolver` constructor becomes `(ArangoClient, TypeMapper, ArangoConfig, SchemaOverrideReader)`; `ArangoModule` constructor becomes `ArangoModule(TypeManager typeManager)`. Every later task sees the same resolver behavior; the container e2e (Task 8) proves the Guice graph.
 
 - [ ] **Step 1: Write the failing tests.** In `SchemaResolverTest`:
 
@@ -940,6 +965,19 @@ binder.bind(TypeManager.class).toInstance(typeManager);
 binder.bind(io.arango.trino.schema.SchemaOverrideReader.class).in(Scopes.SINGLETON);
 ```
 
+Other constructor call sites (compile breaks without these — both are hand-wired test graphs, not Guice):
+
+- `ArangoMetadataPassthroughTest.java:47` currently passes `new ArangoConfig()` inline. Hoist ONE shared config instance and reuse it for resolver + reader (the reader reads `getSchemaCollection()`/`getSchemaCacheTtl()` from the same config the resolver uses — two separate instances would be a latent trap):
+
+```java
+ArangoConfig cfg = new ArangoConfig();
+... new SchemaResolver(client, new TypeMapper(), cfg,
+        new SchemaOverrideReader(client,
+                io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER, cfg)),
+```
+
+- `AggregationWireQueryTest.java:87` — same shape with that class's existing `config` variable. This class is container-backed and DOES resolve columns: the reader will issue one real `collectionExists(db, "trino_schema")` probe per database, get `false`, and fall through to sampling. That extra round-trip is expected, not a bug.
+
 - [ ] **Step 4: Run.** `mvn test -Dtest=SchemaResolverTest` — PASS (new tests and all pre-existing ones). Then `mvn test -Dtest=ArangoConnectorQueryTest` — the `DistributedQueryRunner` boot proves the new Guice graph resolves (`TypeManager` instance binding + reader singleton); expected PASS with zero behavior change.
 
 - [ ] **Step 5: Commit.** `feat: bind TypeManager, wire SchemaOverrideReader precedence into SchemaResolver (M6-C)`.
@@ -955,7 +993,7 @@ binder.bind(io.arango.trino.schema.SchemaOverrideReader.class).in(Scopes.SINGLET
 **Interfaces:**
 - Consumes/Produces: no signature changes — `writeValue(BlockBuilder, Type, Object, String)` unchanged; behavior per spec §5.1.
 
-- [ ] **Step 1: Read the existing decimal tests.** Open `ValueMaterializerTest` and find every `DECIMAL(38,0)` case. One expectation flips **deliberately** (spec §5.1, one-code-path rule): a numeric **string** under a decimal column previously read as mismatch → it now converts exactly (`"123"` → `123`). Update that assertion in place with a comment citing spec §5.1 ("strings are the real decimal path — ArangoDB has no decimal type"). Every other 38,0 expectation must stay green: fractional double → mismatch (now via inexact `setScale(0)`), `Infinity`/`NaN` → mismatch, integral double ≥ 2⁵³ reads its **exact binary value** (`new BigDecimal(d)`, never `valueOf`), > 38-digit → mismatch.
+- [ ] **Step 1: Flip the one known assertion.** Exactly ONE existing expectation flips **deliberately** (spec §5.1, one-code-path rule): `ValueMaterializerTest.java:230` — `assertThat(materialize(DEC38, "42", LENIENT).isNull(0)).isTrue(); // non-number` — a numeric **string** under a decimal column previously read as mismatch; it now converts exactly (`"42"` → `42`). Rewrite that line to assert the value `42` with a comment citing spec §5.1 ("strings are the real decimal path — ArangoDB has no decimal type"). This is the only decimal-string assertion in the whole test tree (verified at plan time); every other 38,0 expectation must stay green: fractional double → mismatch (now via inexact `setScale(0)`), `Infinity`/`NaN` → mismatch, integral double ≥ 2⁵³ reads its **exact binary value** (`new BigDecimal(d)`, never `valueOf`), > 38-digit → mismatch.
 
 - [ ] **Step 2: Write the failing tests** (follow the test class's existing block-building/assertion helpers exactly — read two existing decimal tests first and reuse their helper style):
 
@@ -978,6 +1016,8 @@ decimal(20,4)  [LONG decimal, fractional scale]
 decimal(38,0)  [regression: unchanged behavior except the string flip]
   1e19 (Double)           -> 10000000000000000000 (uint64 case, unchanged)
   "123" (String)          -> 123 (the DELIBERATE flip, Step 1)
+null under decimal(12,2)  -> NULL in BOTH modes (stored null is never a mismatch — pins
+                             the spec §3 all-NULL limitation at the new leaf)
 ```
 
 - [ ] **Step 3: Run to verify failure.** `mvn test -Dtest=ValueMaterializerTest` — the `decimal(12,2)` cases fail with `UnsupportedOperationException` from `ShortDecimalType`'s default `writeObject` (this failure is itself review-finding B2 reproduced); string cases fail as mismatch.
@@ -1078,7 +1118,11 @@ timestamp(3) with time zone:
   "2026-08-05T12:34:56+05:30:15"  -> mismatch (sub-minute offset: TimeZoneKey would throw)
   "2026-08-05T12:34:56+16:00"     -> mismatch (parser allows ±18:00; Trino only ±14:00)
   "2026-08-05T12:34:56.1234+01:00"-> mismatch (finer than millis)
-  "+300000-01-01T00:00:00Z"       -> mismatch (52-bit packed-millis overflow, NOT an exception)
+  "+300000-01-01T00:00:00Z"       -> mismatch (52-bit packed-millis overflow via pack's
+                                     IllegalArgumentException — toEpochMilli itself succeeds here)
+  "+999999999-12-31T23:59:59Z"    -> mismatch (epoch-millis ~3.15e19 > Long.MAX_VALUE:
+                                     toEpochMilli's ArithmeticException arm, exercised)
+  null under both timestamp types -> NULL in BOTH modes (stored null never a mismatch)
 nested:
   array(timestamp(3)) with ["2026-08-05T12:00:00", "bad"] -> lenient: [ts, NULL]; strict: error path "col[1]"
   row("amount" decimal(10,2)) with {"amount": "12.34"}    -> reads 12.34 (nested new-leaf recursion works)
@@ -1134,10 +1178,13 @@ private static Long localIsoToEpochMicros(String s) {
 
 /**
  * ISO_OFFSET_DATE_TIME string -> packDateTimeWithZone(millis, offset key), or null on any
- * mismatch: unparseable/local string, finer-than-millis, sub-minute offset (parser accepts
- * +05:30:15, TimeZoneKey does not), offset beyond ±14:00 (parser accepts ±18:00), epoch-milli
- * overflow (toEpochMilli throws ArithmeticException), or 52-bit packed-millis overflow
- * (pack throws IllegalArgumentException). Under lenient, NO stored string may throw.
+ * mismatch: unparseable/local string, finer-than-millis, sub-minute or beyond-±14:00 offset
+ * (enforced by the EXPLICIT pre-checks below — TimeZoneKey.getTimeZoneKeyForOffset throws
+ * TrinoException, which is NOT an IllegalArgumentException, so the pre-checks are
+ * load-bearing, not defensive), epoch-milli overflow (toEpochMilli throws
+ * ArithmeticException), or 52-bit packed-millis overflow (pack throws
+ * IllegalArgumentException). The catch is the last line of the lenient no-throw guarantee:
+ * NO stored string may ever fail a query.
  */
 private static Long offsetIsoToPackedMillis(String s) {
     OffsetDateTime dateTime;
@@ -1161,7 +1208,9 @@ private static Long offsetIsoToPackedMillis(String s) {
         return DateTimeEncoding.packDateTimeWithZone(
                 dateTime.toInstant().toEpochMilli(),
                 TimeZoneKey.getTimeZoneKeyForOffset(offsetMinutes));
-    } catch (ArithmeticException | IllegalArgumentException e) {
+    } catch (RuntimeException e) {
+        // ArithmeticException (toEpochMilli), IllegalArgumentException (pack overflow),
+        // and any engine-side throw the pre-checks missed: all become a per-cell mismatch.
         return null;
     }
 }
@@ -1183,19 +1232,20 @@ Imports: `io.trino.spi.type.TimestampType`, `TimestampWithTimeZoneType`, `DateTi
 **Interfaces:**
 - Consumes: everything above via the full connector stack (`DistributedQueryRunner` + container). No new interfaces.
 
-- [ ] **Step 1: Write the failing tests.** In the existing fixture setup, add (following the class's established seeding style):
+- [ ] **Step 1: Write the failing tests.** This class has NO `newMap` helper (that is `SchemaResolverTest`-private) — it seeds with `Map.of(...)` inside `try (ArangoClient seed = ...)`; follow that exactly. The deliberately-malformed override goes in a **separate database** (`shop_broken`) so the poison never leaks into the shared `shop` schema that every other test (and any future `information_schema` test) enumerates. Add to the existing seeding block:
 
 ```java
-client.createDocumentCollectionForTest("shop", "invoices");
-client.insertForTest("shop", "invoices", newMap(
+// -- M6-C: override-driven table (spec §8 e2e) --
+seed.createDocumentCollectionForTest("shop", "invoices");
+seed.insertForTest("shop", "invoices", Map.of(
         "total", "12.34",
         "placed_at", "2026-08-05T12:34:56.789+05:30",
         "updated_at", "2026-08-05T12:34:56.789",
         "internal_note", "secret"));
-// NOTE: the override below also declares "missplled" (sic), which matches NO stored
-// attribute — pinning the spec §3 accepted limitation (all-NULL, both coercion modes).
-client.createDocumentCollectionForTest("shop", "trino_schema");
-client.insertForTest("shop", "trino_schema", newMap(
+// The override also declares "missplled" (sic), matching NO stored attribute —
+// pinning the spec §3 accepted limitation (all-NULL column, no error).
+seed.createDocumentCollectionForTest("shop", "trino_schema");
+seed.insertForTest("shop", "trino_schema", Map.of(
         "table", "invoices",
         "fields", List.of(
                 Map.of("name", "total", "type", "decimal(12,2)"),
@@ -1203,21 +1253,24 @@ client.insertForTest("shop", "trino_schema", newMap(
                 Map.of("name", "updated_at", "type", "timestamp(3)"),
                 Map.of("name", "internal_note", "type", "varchar", "hidden", true),
                 Map.of("name", "missplled", "type", "varchar"))));
-// malformed override for a DIFFERENT table: must only break that table, lazily
-client.createDocumentCollectionForTest("shop", "broken");
-client.insertForTest("shop", "broken", newMap("x", 1L));
-client.insertForTest("shop", "trino_schema", newMap(
+// Malformed override, QUARANTINED in its own database: resolving 'broken' must fail
+// lazily without poisoning shop's schema-wide enumeration.
+seed.createDatabaseForTest("shop_broken");
+seed.createDocumentCollectionForTest("shop_broken", "broken");
+seed.insertForTest("shop_broken", "broken", Map.of("x", 1L));
+seed.createDocumentCollectionForTest("shop_broken", "trino_schema");
+seed.insertForTest("shop_broken", "trino_schema", Map.of(
         "table", "broken",
         "fields", List.of(Map.of("name", "x", "type", "not_a_type"))));
 ```
 
-Tests (use the class's existing query/assert helpers):
+Tests (use the class's existing query/assert helpers; unqualified names are in schema `shop`, the broken ones schema-qualified as `shop_broken.broken`):
 
 1. `SELECT total, updated_at, placed_at FROM invoices` — assert `12.34` (decimal), `TIMESTAMP '2026-08-05 12:34:56.789'`, and the tz value at `+05:30`.
-2. `SELECT * FROM invoices` returns only the three non-hidden columns (`internal_note` absent); `SELECT internal_note FROM invoices` returns `secret`.
-3. `SHOW TABLES` lists `invoices`, `broken`, **and** `trino_schema` (the override collection is an ordinary table — spec §8 decision).
-4. `SELECT * FROM broken` fails with message containing `not_a_type` (the lazy `ARANGODB_SCHEMA_ERROR`); `SHOW TABLES` still succeeds.
-5. **Observe and pin** `information_schema.columns` behavior with the malformed doc present: run `SELECT column_name FROM information_schema.columns WHERE table_schema = 'shop' AND table_name = 'invoices'` and `SHOW COLUMNS FROM invoices` — if either fails because the engine's fallback resolves `broken` schema-wide, pin the observed failure in the test with a comment marking it an **accepted deviation from master-spec §4.2** (and note it for Task 10's CLAUDE.md update); if they succeed, assert success. Either way the behavior is pinned, not incidental.
+2. `SELECT * FROM invoices` returns exactly the four non-hidden columns `total, placed_at, updated_at, missplled` (`internal_note` absent); `SELECT internal_note FROM invoices` returns `secret`.
+3. `SHOW TABLES` (in `shop`) lists `invoices` **and** `trino_schema` (the override collection is an ordinary table — spec §8 decision).
+4. `SELECT * FROM shop_broken.broken` fails with message containing `not_a_type` (the lazy `ARANGODB_SCHEMA_ERROR`); `SHOW TABLES FROM shop_broken` still succeeds and lists `broken`.
+5. **Observe and pin** `information_schema.columns` behavior with the malformed doc present: run `SELECT column_name FROM information_schema.columns WHERE table_schema = 'shop_broken'` and `SHOW COLUMNS FROM shop_broken.trino_schema` — if either fails because the engine's fallback resolves `broken` schema-wide, pin the observed failure in the test with a comment marking it an **accepted deviation from master-spec §4.2** (and note it for Task 10's CLAUDE.md update); if they succeed, assert success. Either way the behavior is pinned, not incidental.
 6. `SELECT missplled FROM invoices` returns NULL (the misspelled-`name` accepted limitation, spec §3 — pinned, not incidental).
 7. A table with no override doc (the existing fixtures, e.g. `users`) resolves exactly as before while `trino_schema` exists — the class's pre-existing assertions double as this proof; state it in a comment.
 
@@ -1236,29 +1289,44 @@ Tests (use the class's existing query/assert helpers):
 - Modify: `src/test/java/io/arango/trino/ArangoConnectorAggregationTest.java` (aggregation decline/positive proofs)
 
 **Interfaces:**
-- Consumes: Task 8's `invoices` + `trino_schema` fixture pattern (replicate the seeding in whichever class lacks it — do not share mutable fixtures across test classes; each class already owns its own fixture setup).
+- Consumes: the override mechanism end-to-end. Each class seeds its OWN copy of the fixture in its OWN database (`ArangoConnectorPushdownTest` seeds database `shop`; `ArangoConnectorAggregationTest` seeds database `agg`) — do not share fixtures across classes, and **do NOT copy Task 8's malformed `broken` doc here** (it would poison unrelated assertions).
 
-- [ ] **Step 1: Read both classes' existing EXPLAIN/plan-assertion helpers** (how they prove "pushed" vs "residual"/"declined") and reuse them verbatim.
+- [ ] **Step 1: Read both classes' existing plan-assertion helpers and reuse them verbatim.** Both extend `AbstractTestQueryFramework`; the proofs are `assertThat(query(...)).isFullyPushedDown()` / `.isNotFullyPushedDown(AggregationNode.class)` and the filter-side equivalents already used throughout `ArangoConnectorAggregationTest` / `ArangoConnectorPushdownTest`.
 
-- [ ] **Step 2: Write the failing-or-green tests.** Seed an override-declared table with a `decimal(12,2)` column, a `timestamp(3)` column, and a `varchar` column (Task 8's fixture shape). Cases — the four **separate** decline code paths plus two positive controls (spec §6):
+- [ ] **Step 2: Write the tests.** In EACH class's seeding block, create collection `declared` in that class's existing database with one doc and its override:
+
+```java
+seed.createDocumentCollectionForTest(DB, "declared");   // DB = "shop" (Pushdown) / "agg" (Aggregation)
+seed.insertForTest(DB, "declared", Map.of(
+        "tag", "x", "amount", "12.34", "at", "2026-01-02T03:04:05.678"));
+seed.createDocumentCollectionForTest(DB, "trino_schema");
+seed.insertForTest(DB, "trino_schema", Map.of(
+        "table", "declared",
+        "fields", List.of(
+                Map.of("name", "tag", "type", "varchar"),
+                Map.of("name", "amount", "type", "decimal(12,2)"),
+                Map.of("name", "at", "type", "timestamp(3)"))));
+```
+
+(If the class's database already gained a `trino_schema` from another task's edit, add the doc to it instead of re-creating.) Cases — the four **separate** decline code paths plus two positive controls (spec §6):
 
 ```text
-ArangoConnectorPushdownTest:
-  WHERE ts_col > TIMESTAMP '2026-01-01 00:00:00'    -> residual (isPushable declines TimestampType)
-  WHERE dec_col = DECIMAL '12.34'                   -> residual (isPushable declines DecimalType)
-  WHERE varchar_col = 'x' (same override table)     -> PUSHED (positive: override source doesn't matter)
-ArangoConnectorAggregationTest:
-  min(ts_col)        -> declined (specFor min/max allowlist)
-  sum(dec_col)       -> declined (specFor sum gate)
-  count(ts_col)      -> declined (ColumnGuard.predicate gate)
-  GROUP BY ts_col    -> declined (grouping-key ColumnGuard path)
-  count(*) on the override table            -> PUSHED (positive)
-  GROUP BY varchar_col on the override table -> PUSHED (positive)
+ArangoConnectorPushdownTest (table shop.declared):
+  WHERE at > TIMESTAMP '2026-01-01 00:00:00'   -> residual (isPushable declines TimestampType)
+  WHERE amount = DECIMAL '12.34'               -> residual (isPushable declines DecimalType)
+  WHERE tag = 'x'                              -> PUSHED (positive: override source doesn't matter)
+ArangoConnectorAggregationTest (table agg.declared):
+  min(at)       -> declined (specFor min/max allowlist)
+  sum(amount)   -> declined (specFor sum gate)
+  count(at)     -> declined (ColumnGuard.predicate gate)
+  GROUP BY at   -> declined (grouping-key ColumnGuard path)
+  count(*) FROM declared    -> PUSHED (positive)
+  GROUP BY tag              -> PUSHED (positive)
 ```
 
 Each declined case must also assert the **result is still correct** (Trino computes it), not just that pushdown didn't happen.
 
-- [ ] **Step 3: Run.** `mvn test -Dtest=ArangoConnectorPushdownTest,ArangoConnectorAggregationTest` — PASS (these should be green immediately; they are proofs pinning "by construction" claims, and a failure means a real M6-C bug — investigate, do not weaken the test).
+- [ ] **Step 3: Run.** `mvn test -Dtest=ArangoConnectorPushdownTest,ArangoConnectorAggregationTest` — PASS, including every pre-existing test in both classes (these proofs should be green immediately; a failure means a real M6-C bug — investigate, do not weaken the test).
 
 - [ ] **Step 4: Commit.** `test: pin auto-decline of declared types across all four pushdown paths (M6-C)`.
 
