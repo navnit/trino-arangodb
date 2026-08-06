@@ -284,7 +284,7 @@ class ArangoMetadataTest {
         private final List<ArangoColumn> canned;
 
         CountingSchemaResolver(List<ArangoColumn> canned) {
-            super(null, null, null);
+            super(null, null, null, null);
             this.canned = canned;
         }
 
@@ -895,7 +895,7 @@ class ArangoMetadataTest {
         private final TrinoException exception;
 
         ThrowingSchemaResolver(TrinoException exception) {
-            super(null, null, null);
+            super(null, null, null, null);
             this.exception = exception;
         }
 

@@ -13,13 +13,23 @@ import io.arango.trino.ptf.ArangoQueryFunction;
 import io.arango.trino.schema.SchemaResolver;
 import io.arango.trino.type.TypeMapper;
 import io.trino.spi.function.table.ConnectorTableFunction;
+import io.trino.spi.type.TypeManager;
+import java.util.Objects;
 
 public class ArangoModule extends AbstractConfigurationAwareModule {
+    private final TypeManager typeManager;
+
+    public ArangoModule(TypeManager typeManager) {
+        this.typeManager = Objects.requireNonNull(typeManager, "typeManager is null");
+    }
+
     @Override
     protected void setup(Binder binder) {
         configBinder(binder).bindConfig(ArangoConfig.class);
+        binder.bind(TypeManager.class).toInstance(typeManager);
         binder.bind(ArangoClient.class).in(Scopes.SINGLETON);
         binder.bind(TypeMapper.class).in(Scopes.SINGLETON);
+        binder.bind(io.arango.trino.schema.SchemaOverrideReader.class).in(Scopes.SINGLETON);
         binder.bind(SchemaResolver.class).in(Scopes.SINGLETON);
         binder.bind(AqlBuilder.class).in(Scopes.SINGLETON);
         binder.bind(ArangoMetadata.class).in(Scopes.SINGLETON);

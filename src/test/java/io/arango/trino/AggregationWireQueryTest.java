@@ -84,7 +84,16 @@ class AggregationWireQueryTest {
         client.insertForTest(DB, "sales", Map.of("city", "sfo", "qty", 7L, "price", 4.0));
         metadata =
                 new ArangoMetadata(
-                        client, new SchemaResolver(client, new TypeMapper(), config), config);
+                        client,
+                        new SchemaResolver(
+                                client,
+                                new TypeMapper(),
+                                config,
+                                new io.arango.trino.schema.SchemaOverrideReader(
+                                        client,
+                                        io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER,
+                                        config)),
+                        config);
     }
 
     @AfterAll
