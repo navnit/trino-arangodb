@@ -507,6 +507,8 @@ class ArangoConnectorAggregationTest extends AbstractTestQueryFramework {
         MaterializedResult groupByAt =
                 computeActual("SELECT at, count(*) FROM arango.agg.declared GROUP BY at");
         assertThat(groupByAt.getMaterializedRows()).hasSize(1);
+        assertThat(groupByAt.getMaterializedRows().get(0).getField(0))
+                .isEqualTo(LocalDateTime.parse("2026-01-02T03:04:05.678"));
         assertThat(groupByAt.getMaterializedRows().get(0).getField(1)).isEqualTo(1L);
     }
 
