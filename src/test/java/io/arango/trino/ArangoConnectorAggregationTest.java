@@ -12,6 +12,8 @@ import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.MaterializedResult;
 import io.trino.testing.QueryRunner;
+import java.math.BigDecimal;
+import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -77,6 +79,29 @@ class ArangoConnectorAggregationTest extends AbstractTestQueryFramework {
             seed.insertForTest("agg", "zeros", Map.of("z", 0L));
             seed.insertForTest("agg", "zeros", Map.of("z", -0.0d));
             seed.insertForTest("agg", "zeros", Map.of("z", 0.0d));
+
+            // Declared-type fixture (M6-C task 9): a schema-override doc types "amount" DECIMAL
+            // and "at" TIMESTAMP, neither of which ColumnGuard.predicate/AggregatePushdown's
+            // BIGINT/DOUBLE-only allowlists admit. Used to pin that aggregation pushdown
+            // auto-declines both across min/max, sum, count(col) and grouping-key, while an
+            // ordinary VARCHAR column on the same override-driven table still pushes.
+            seed.createDocumentCollectionForTest("agg", "declared");
+            seed.insertForTest(
+                    "agg",
+                    "declared",
+                    Map.of("tag", "x", "amount", "12.34", "at", "2026-01-02T03:04:05.678"));
+            seed.createDocumentCollectionForTest("agg", "trino_schema");
+            seed.insertForTest(
+                    "agg",
+                    "trino_schema",
+                    Map.of(
+                            "table",
+                            "declared",
+                            "fields",
+                            List.of(
+                                    Map.of("name", "tag", "type", "varchar"),
+                                    Map.of("name", "amount", "type", "decimal(12,2)"),
+                                    Map.of("name", "at", "type", "timestamp(3)"))));
         }
 
         QueryRunner runner =
@@ -417,5 +442,81 @@ class ArangoConnectorAggregationTest extends AbstractTestQueryFramework {
     @Test
     void disablingPushdownChangesNothingButThePlan() {
         assertSameAsReference("SELECT city, count(*), sum(price) FROM %s.sales GROUP BY city");
+    }
+
+    // Guards the guards, same reason dirtyFixtureIsActuallyDirty exists: every assertion below
+    // rests on the override actually applying "amount"/"at" as DECIMAL/TIMESTAMP rather than the
+    // VARCHAR the raw stored strings would otherwise infer as. If it silently stopped applying,
+    // min(at) would pass for the wrong reason (VARCHAR min/max is declined too) while count(at)/
+    // GROUP BY at would start pushing and sum(amount) would fail analysis -- so most, but not all,
+    // of the ensemble below would still catch it. This pins the premise directly.
+    @Test
+    void declaredFixtureIsActuallyDeclared() {
+        assertThat(computeActual("DESCRIBE arango.agg.declared").getMaterializedRows())
+                .anySatisfy(
+                        r ->
+                                assertThat(List.of(r.getField(0), r.getField(1)))
+                                        .isEqualTo(List.of("tag", "varchar")))
+                .anySatisfy(
+                        r ->
+                                assertThat(List.of(r.getField(0), r.getField(1)))
+                                        .isEqualTo(List.of("amount", "decimal(12,2)")))
+                .anySatisfy(
+                        r ->
+                                assertThat(List.of(r.getField(0), r.getField(1)))
+                                        .isEqualTo(List.of("at", "timestamp(3)")));
+    }
+
+    // Pins the four separate decline code paths a declared TIMESTAMP/DECIMAL column hits:
+    // isMinMaxable's BIGINT/DOUBLE allowlist (min), specFor's sum gate (DoubleType-only),
+    // ColumnGuard.predicate's guard allowlist for count(col), and the grouping-key
+    // ColumnGuard.predicate check in AggregatePushdown.plan's groupingColumns loop.
+    @Test
+    void declaredTimestampAndDecimalColumnsDeclineAggregation() {
+        assertThat(query("SELECT min(at) FROM arango.agg.declared"))
+                .isNotFullyPushedDown(AggregationNode.class);
+        assertThat(query("SELECT sum(amount) FROM arango.agg.declared"))
+                .isNotFullyPushedDown(AggregationNode.class);
+        assertThat(query("SELECT count(at) FROM arango.agg.declared"))
+                .isNotFullyPushedDown(AggregationNode.class);
+        assertThat(query("SELECT at, count(*) FROM arango.agg.declared GROUP BY at"))
+                .isNotFullyPushedDown(AggregationNode.class);
+    }
+
+    // Each declined shape above must still return the value Trino computes locally -- proven both
+    // against the "noagg" reference (same pattern as declinedShapesStillReturnCorrectResults) and,
+    // since the fixture is a single known row, against an explicit expected value.
+    @Test
+    void declaredTimestampAndDecimalColumnsStillReturnCorrectResults() {
+        assertSameAsReference("SELECT min(at) FROM %s.declared");
+        assertSameAsReference("SELECT sum(amount) FROM %s.declared");
+        assertSameAsReference("SELECT count(at) FROM %s.declared");
+        assertSameAsReference("SELECT at, count(*) FROM %s.declared GROUP BY at");
+
+        MaterializedResult minAt = computeActual("SELECT min(at) FROM arango.agg.declared");
+        assertThat(minAt.getMaterializedRows().get(0).getField(0))
+                .isEqualTo(LocalDateTime.parse("2026-01-02T03:04:05.678"));
+
+        MaterializedResult sumAmount = computeActual("SELECT sum(amount) FROM arango.agg.declared");
+        assertThat((BigDecimal) sumAmount.getMaterializedRows().get(0).getField(0))
+                .isEqualByComparingTo(new BigDecimal("12.34"));
+
+        MaterializedResult countAt = computeActual("SELECT count(at) FROM arango.agg.declared");
+        assertThat(countAt.getMaterializedRows().get(0).getField(0)).isEqualTo(1L);
+
+        MaterializedResult groupByAt =
+                computeActual("SELECT at, count(*) FROM arango.agg.declared GROUP BY at");
+        assertThat(groupByAt.getMaterializedRows()).hasSize(1);
+        assertThat(groupByAt.getMaterializedRows().get(0).getField(1)).isEqualTo(1L);
+    }
+
+    // Positive controls: the override doc typing "amount"/"at" doesn't taint the same table's
+    // other pushdown-eligible shapes -- a global count(*) and a GROUP BY on the plain VARCHAR
+    // "tag" column both still push fully.
+    @Test
+    void declaredTableStillPushesOrdinaryAggregateShapes() {
+        assertThat(query("SELECT count(*) FROM arango.agg.declared")).isFullyPushedDown();
+        assertThat(query("SELECT tag, count(*) FROM arango.agg.declared GROUP BY tag"))
+                .isFullyPushedDown();
     }
 }
