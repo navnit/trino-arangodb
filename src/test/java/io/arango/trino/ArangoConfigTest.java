@@ -28,7 +28,8 @@ class ArangoConfigTest {
                         .setQueryFunctionEnabled(true)
                         .setStatisticsEnabled(true)
                         .setStatisticsCacheTtl(new Duration(5, MINUTES))
-                        .setSchemaCacheTtl(new Duration(5, MINUTES)));
+                        .setSchemaCacheTtl(new Duration(5, MINUTES))
+                        .setSchemaCollection("trino_schema"));
     }
 
     @Test
@@ -50,6 +51,7 @@ class ArangoConfigTest {
                         .put("arangodb.statistics-enabled", "false")
                         .put("arangodb.statistics.cache-ttl", "10m")
                         .put("arangodb.schema.cache-ttl", "10m")
+                        .put("arangodb.schema-collection", "my_overrides")
                         .buildOrThrow();
 
         ArangoConfig expected =
@@ -68,7 +70,8 @@ class ArangoConfigTest {
                         .setQueryFunctionEnabled(false)
                         .setStatisticsEnabled(false)
                         .setStatisticsCacheTtl(new Duration(10, MINUTES))
-                        .setSchemaCacheTtl(new Duration(10, MINUTES));
+                        .setSchemaCacheTtl(new Duration(10, MINUTES))
+                        .setSchemaCollection("my_overrides");
 
         ConfigAssertions.assertFullMapping(props, expected);
         // hosts parsed into list
