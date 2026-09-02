@@ -27,7 +27,7 @@ jobs:
 
       # maven.compiler.release=25 in pom.xml requires a JDK >= 25.
       - name: Set up JDK 25
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '25'
@@ -94,7 +94,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up JDK 25
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '25'
@@ -153,7 +153,7 @@ jobs:
       # versions (google-java-format 1.35, SpotBugs 4.10) are the JDK-25-capable
       # floors the whole toolchain now standardises on.
       - name: Set up JDK 25
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '25'
